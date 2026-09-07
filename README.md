@@ -201,11 +201,14 @@ the small repeat-guard history.
   the other one. Picking the least-recently-used one instead rotates
   through more of a genre clique rather than bouncing between just two
   artists.
-- The repeat-guard history is reset automatically when the queue looks
-  like a freshly-started session (position 0, only a single track) -
-  otherwise artists from a completely different previous listening
-  session would block otherwise-fresh candidates for the new one, and/or
-  feed straight into the ping-pong situation above.
+- The repeat-guard history is reset automatically whenever the queue
+  position is 0 - a freshly-started session, whether a single track or a
+  whole album/playlist queued at once - since otherwise artists from a
+  completely different previous listening session would block
+  otherwise-fresh candidates for the new one, and/or feed straight into
+  the ping-pong situation above. The one downside is a rare false
+  positive: manually rewinding to track 1 of the same still-running queue
+  also resets the guard a little early, which is harmless.
 - The Last.fm similarity graph can still drift fairly far from where you
   started over a long listening session, since `SEED_WINDOW_SIZE` only
   weights toward the last few queued artists, with no anchoring back to

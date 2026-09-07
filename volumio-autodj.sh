@@ -204,13 +204,17 @@ remaining=$(( queue_len - position - 1 ))
 
 log "Queue: $queue_len tracks, position=$position, remaining after current=$remaining (threshold=$QUEUE_LOW_THRESHOLD)"
 
-# Position 0 with only a single track is a strong signal the user just
-# started something completely new (e.g. "play" on one item, replacing
-# whatever was queued before) - reset the repeat-guard history in that
-# case so leftover artists from an entirely different previous listening
-# session don't block otherwise-fresh candidates for this new one.
-if (( position == 0 && queue_len <= 1 )) && [[ -s "$HISTORY_FILE" ]]; then
-  log "Fresh queue detected (position=0, $queue_len track(s)) - resetting repeat-guard history from the previous session"
+# Position 0 is a strong signal the user just started something completely
+# new (a single track, or a whole album/playlist queued from scratch) -
+# reset the repeat-guard history in that case so leftover artists from an
+# entirely different previous listening session don't block otherwise-fresh
+# candidates for this new one. A queue_len or artist-overlap check was
+# considered and dropped: both would miss valid resets whenever the new
+# queue happens to share an artist with the old history, which costs more
+# than the rare false positive here (manually rewinding to track 1 of the
+# same still-running queue just resets the guard a little early).
+if (( position == 0 )) && [[ -s "$HISTORY_FILE" ]]; then
+  log "Fresh queue detected (position=0) - resetting repeat-guard history from the previous session"
   : > "$HISTORY_FILE"
 fi
 
