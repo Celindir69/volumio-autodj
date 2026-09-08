@@ -190,6 +190,10 @@ the small repeat-guard history.
 - Only handles **appending** to the queue - it never removes or reorders
   existing entries, so manual changes you make in the meantime are never
   overwritten.
+- If you're currently listening to a web radio station (`trackType` =
+  `webradio` in Volumio's state), the script does nothing that run - there's
+  no track/artist to seed from, and a radio stream isn't "running low" on
+  queue positions the way a normal queue is.
 - If none of the `CANDIDATE_LIMIT` similar artists for the current seed are
   in your local library, the run simply does nothing that time - it tries
   again with a (likely different) seed on the next scheduled run once the

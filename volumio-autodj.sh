@@ -199,6 +199,16 @@ if [[ "$status" != "play" ]]; then
   exit 0
 fi
 
+# Web radio streams have no track/artist to seed from and no meaningful
+# "position in the queue" (they're not consumed like queued tracks) - stop
+# here rather than let the queue-low check below fire on a stream that was
+# never going to run out in the first place.
+track_type="$(jq_safe '.trackType // empty' '' "$state_json")"
+if [[ "$track_type" == "webradio" ]]; then
+  log "Currently playing a web radio stream (trackType=webradio) - nothing to do"
+  exit 0
+fi
+
 queue_json="$(curl -sf --max-time 10 "${api_base}/getqueue")" || {
   log "Could not reach Volumio's REST API at $api_base (getqueue)"
   exit 1
