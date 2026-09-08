@@ -60,6 +60,12 @@ HISTORY_SIZE="${HISTORY_SIZE:-15}"
 # see step 2 below. 1 reproduces the old "always the last track" behavior.
 SEED_WINDOW_SIZE="${SEED_WINDOW_SIZE:-5}"
 
+# When the initial seed's Last.fm candidates are all blocked by the repeat
+# guard (or not found locally), retry with up to this many different seed
+# artists picked at random from the queue before falling back to the
+# least-recently-used candidate - see step 4b below.
+MAX_SEED_RETRIES="${MAX_SEED_RETRIES:-2}"
+
 # Same idea as SMART_PLAYLISTS_URI_PREFIXES in volumio-smart-playlists.sh -
 # maps the first path segment MPD reports for a track to the prefix needed
 # to build a Volumio playlist/queue "uri". Kept independent (own env var)
@@ -357,7 +363,99 @@ for cand in "${candidates[@]}"; do
   fi
 done
 
-# Nothing survived the repeat guard - rather than let the queue run dry,
+# ---------------------------------------------------------------------------
+# 4b. Still nothing? Retry with up to MAX_SEED_RETRIES different seed
+#     artists picked at random from the WHOLE queue (not just the weighted
+#     last-SEED_WINDOW_SIZE window used in step 2) before falling back to
+#     the least-recently-used candidate below. A retry seed drawn from that
+#     same narrow window is often pointless: artists that rank as mutually
+#     "similar" on Last.fm tend to cluster in the local library too, so a
+#     different seed from the same handful of recent tracks usually points
+#     right back at the same few names already blocked by the repeat guard
+#     (e.g. a run of Italo-disco/synth-pop tracks whose Last.fm neighbors
+#     are all each other). Pulling from the full queue gives a real chance
+#     of escaping such a genre clique. Best-effort: a failed request here
+#     just means one less retry, not an aborted run - the initial seed's
+#     Last.fm call already succeeded, so this is strictly on top of that.
+# ---------------------------------------------------------------------------
+try_alternate_seed() {
+  local seed="$1" url json err line cand norm_cand real_match
+
+  url="http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
+  json="$(curl -sf --max-time 10 "$url")" || {
+    log "Retry: Last.fm request failed for alternate seed '$seed'"
+    return 1
+  }
+
+  err="$(jq_safe '.message // empty' '' "$json")"
+  if [[ -n "$err" ]]; then
+    log "Retry: Last.fm returned an error for alternate seed '$seed': $err"
+    return 1
+  fi
+
+  candidates=()
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    candidates+=("$line")
+  done < <(printf '%s' "$json" | jq -r '.similarartists.artist[]?.name // empty')
+
+  if (( ${#candidates[@]} == 0 )); then
+    log "Retry: Last.fm returned no similar artists for alternate seed '$seed'"
+    return 1
+  fi
+
+  for cand in "${candidates[@]}"; do
+    [[ -z "$cand" ]] && continue
+    norm_cand="$(normalize "$cand")"
+    if history_contains "$norm_cand"; then
+      log "Retry: skipping '$cand' (recently used, repeat guard)"
+      continue
+    fi
+    if real_match="$(find_local_artist "$norm_cand")"; then
+      chosen_artist="$real_match"
+      log "Retry with alternate seed '$seed': match found in local library: '$cand' -> '$chosen_artist'"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+if [[ -z "$chosen_artist" ]]; then
+  tried_seeds=("$(normalize "$seed_artist")")
+  retries=0
+  while (( retries < MAX_SEED_RETRIES )) && [[ -z "$chosen_artist" ]]; do
+    retry_pool=()
+    for a in "${queue_artists[@]}"; do
+      [[ -z "$a" ]] && continue
+      norm_a="$(normalize "$a")"
+      already_tried=0
+      for t in "${tried_seeds[@]}"; do
+        [[ "$norm_a" == "$t" ]] && { already_tried=1; break; }
+      done
+      (( already_tried )) && continue
+      retry_pool+=("$a")
+    done
+
+    if (( ${#retry_pool[@]} == 0 )); then
+      log "No more distinct queue artists left to retry with"
+      break
+    fi
+
+    retry_seed="${retry_pool[$(( RANDOM % ${#retry_pool[@]} ))]}"
+    tried_seeds+=("$(normalize "$retry_seed")")
+    retries=$(( retries + 1 ))
+    log "No fresh match for '$seed_artist' - retrying (${retries}/${MAX_SEED_RETRIES}) with a different seed from the queue: '$retry_seed'"
+    # "|| true": a failed/unsuccessful retry (return 1) must NOT abort the
+    # whole script under "set -e" here - it's a bare statement, not part of
+    # an if/while/&&, so its own failure would otherwise be fatal even
+    # though it just means "try the next retry, or fall through to the LRU
+    # fallback below" (caught by the isolated logic test for this loop).
+    try_alternate_seed "$retry_seed" || true
+  done
+fi
+
+# Nothing survived the repeat guard (nor any retry) - rather than let the queue run dry,
 # fall back to whichever eligible candidate was used LEAST RECENTLY
 # (earliest line in the history file) instead of simply the most similar
 # one. Falling back to "most similar" would otherwise let two artists

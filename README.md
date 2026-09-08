@@ -169,6 +169,10 @@ the small repeat-guard history.
   track (the old behavior).
 - `HISTORY_SIZE` (default `15`) - how many recently-used artists the
   repeat guard remembers.
+- `MAX_SEED_RETRIES` (default `2`) - if every similar artist for the
+  initial seed is blocked by the repeat guard, how many additional random
+  seed artists from the queue to retry with before falling back to the
+  least-recently-used candidate - see "Notes / limitations" below.
 - `AUTODJ_URI_PREFIXES` - maps the first path segment MPD reports for a
   track (its source label, e.g. `INTERNAL`/`USB`/`NAS`) to the prefix
   needed to build a Volumio queue `uri`. Newline-separated
@@ -190,11 +194,21 @@ the small repeat-guard history.
   in your local library, the run simply does nothing that time - it tries
   again with a (likely different) seed on the next scheduled run once the
   queue moves on. If candidates ARE in your library but every one of them
-  was filtered by the repeat guard, the guard is overridden as a fallback
-  and the **least-recently-used** of the eligible candidates is picked
-  anyway (still a freshly-randomized track of theirs) - letting playback
-  stop entirely would be worse than an occasional early repeat.
-  Deliberately not the *most similar* eligible candidate here: two
+  was filtered by the repeat guard, the script retries with up to
+  `MAX_SEED_RETRIES` (default 2) different seed artists picked at random
+  from the whole current queue, each with its own fresh Last.fm lookup,
+  before giving up on finding something new. This matters because artists
+  that rank as mutually "similar" on Last.fm tend to cluster in a local
+  library too - a run of Italo-disco/synth-pop tracks, say, whose Last.fm
+  neighbors are mostly each other - so simply trying a different *recent*
+  seed often just leads back to the same handful of names already blocked
+  by the repeat guard; a seed pulled from further back in the queue has a
+  real chance of breaking out of that clique. Only if none of those
+  retries turn up anything fresh either does the guard get overridden as a
+  last-resort fallback, picking the **least-recently-used** of the
+  eligible candidates anyway (still a freshly-randomized track of theirs)
+  - letting playback stop entirely would be worse than an occasional early
+  repeat. Deliberately not the *most similar* eligible candidate here: two
   artists that mutually rank as each other's closest Last.fm match would
   otherwise ping-pong forever once both are "recently used" - each run's
   seed becomes whichever one was just added, and its own top fallback is
@@ -237,7 +251,8 @@ the small repeat-guard history.
 
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
-`SEED_WINDOW_SIZE`, `HISTORY_SIZE`, `AUTODJ_URI_PREFIXES`), but runs
+`SEED_WINDOW_SIZE`, `HISTORY_SIZE`, `MAX_SEED_RETRIES`,
+`AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:
 
