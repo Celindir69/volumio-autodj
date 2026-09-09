@@ -60,11 +60,15 @@ Each run does at most one check and, if needed, adds exactly one track:
    reproduces the old "always the last track" behavior exactly.
 3. Tries each candidate in order until one is found in the local library
    (checked via `mpc list artist`) - and skips any candidate that was used
-   too recently (**repeat guard**: a small history file of the last
-   `HISTORY_SIZE` artists, so the same artist isn't picked again right
-   away).
-4. Picks one random track by the matched artist and appends it to the end
-   of the queue via Volumio's `addToQueue` command.
+   too recently (**artist repeat guard**: a small history file of the last
+   `ARTIST_HISTORY_SIZE` artists, so the same artist isn't picked again
+   right away).
+4. Picks one random track by the matched artist, preferring one that isn't
+   in the **track repeat guard** (the last `TRACK_HISTORY_SIZE` tracks
+   actually added - a separate, normally larger history than the artist
+   one, since hearing the same artist again soon is fine but hearing the
+   exact same song again isn't), and appends it to the end of the queue
+   via Volumio's `addToQueue` command.
 
 This is deliberately simple/reactive (one track at a time, re-evaluated on
 every run) rather than planning several tracks ahead - it naturally
@@ -167,8 +171,14 @@ the small repeat-guard history.
 - `SEED_WINDOW_SIZE` (default `5`) - how many of the most recent queue
   entries to weight-pick the seed artist from; `1` = always the last
   track (the old behavior).
-- `HISTORY_SIZE` (default `15`) - how many recently-used artists the
-  repeat guard remembers.
+- `ARTIST_HISTORY_SIZE` (default `4`) - how many recently-used artists the
+  artist repeat guard remembers. Repeating the same artist isn't a big
+  deal, so this is deliberately short.
+- `TRACK_HISTORY_SIZE` (default `15`) - how many recently-added tracks the
+  separate track repeat guard remembers, so the exact same song doesn't
+  come back too soon even if its artist is fine to reuse sooner. Falls
+  back to repeating a track anyway if an artist's whole local catalog was
+  used within this window (small library for them).
 - `MAX_SEED_RETRIES` (default `2`) - if every similar artist for the
   initial seed is blocked by the repeat guard, how many additional random
   seed artists from the queue to retry with before falling back to the
@@ -183,7 +193,7 @@ the small repeat-guard history.
   NAS|mnt/
   ```
 - `AUTODJ_STATE_DIR` (default `~/.volumio-autodj`) - where the repeat-guard
-  history and debug log are stored, on the device this script runs on.
+  histories and debug log are stored, on the device this script runs on.
 
 ### Notes / limitations
 
@@ -198,7 +208,7 @@ the small repeat-guard history.
   in your local library, the run simply does nothing that time - it tries
   again with a (likely different) seed on the next scheduled run once the
   queue moves on. If candidates ARE in your library but every one of them
-  was filtered by the repeat guard, the script retries with up to
+  was filtered by the artist repeat guard, the script retries with up to
   `MAX_SEED_RETRIES` (default 2) different seed artists picked at random
   from the whole current queue, each with its own fresh Last.fm lookup,
   before giving up on finding something new. This matters because artists
@@ -206,7 +216,7 @@ the small repeat-guard history.
   library too - a run of Italo-disco/synth-pop tracks, say, whose Last.fm
   neighbors are mostly each other - so simply trying a different *recent*
   seed often just leads back to the same handful of names already blocked
-  by the repeat guard; a seed pulled from further back in the queue has a
+  by the artist repeat guard; a seed pulled from further back in the queue has a
   real chance of breaking out of that clique. Only if none of those
   retries turn up anything fresh either does the guard get overridden as a
   last-resort fallback, picking the **least-recently-used** of the
@@ -219,7 +229,12 @@ the small repeat-guard history.
   the other one. Picking the least-recently-used one instead rotates
   through more of a genre clique rather than bouncing between just two
   artists.
-- The repeat-guard history is reset automatically whenever the queue
+- Separately, whichever artist ends up chosen, the track actually picked
+  for them prefers one outside the track repeat guard too. If an artist's
+  entire local catalog was already used within the last
+  `TRACK_HISTORY_SIZE` additions (a small library for them), a track gets
+  repeated anyway rather than skipping the run.
+- Both repeat-guard histories are reset automatically whenever the queue
   position is 0 - a freshly-started session, whether a single track or a
   whole album/playlist queued at once - since otherwise artists from a
   completely different previous listening session would block
@@ -255,7 +270,7 @@ the small repeat-guard history.
 
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
-`SEED_WINDOW_SIZE`, `HISTORY_SIZE`, `MAX_SEED_RETRIES`,
+`SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`, `MAX_SEED_RETRIES`,
 `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:

@@ -14,10 +14,13 @@
 # schedule itself. Each invocation does at most one queue check and, if
 # needed, adds exactly one track.
 #
-# Simple repeat guard: the last HISTORY_SIZE artists that were added (or
-# used as a seed) are remembered in a small history file, and skipped when
-# picking a candidate, so the same artist isn't immediately re-picked over
-# and over.
+# Repeat guard, split in two: the last ARTIST_HISTORY_SIZE artists that
+# were added (or used as a seed) are skipped when picking a candidate, and
+# separately, the last TRACK_HISTORY_SIZE tracks that were actually added
+# are skipped when picking WHICH track of a chosen artist to add. The same
+# artist coming up again isn't really a problem; hearing the exact same
+# song again soon is - so the track guard is normally set larger than the
+# artist one.
 # =============================================================================
 set -euo pipefail
 
@@ -53,8 +56,9 @@ QUEUE_LOW_THRESHOLD="${QUEUE_LOW_THRESHOLD:-3}"
 # tries them in order (most similar first) until one is found locally.
 CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 
-# How many recently-used artists to remember for the repeat guard.
-HISTORY_SIZE="${HISTORY_SIZE:-15}"
+# Repeat guard, split in two - see the header comment above.
+ARTIST_HISTORY_SIZE="${ARTIST_HISTORY_SIZE:-4}"
+TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
 
 # How many of the most recent queue entries to consider as a seed pool -
 # see step 2 below. 1 reproduces the old "always the last track" behavior.
@@ -77,7 +81,8 @@ NAS|mnt/"
 URI_PREFIXES_RAW="${AUTODJ_URI_PREFIXES:-$AUTODJ_URI_PREFIXES_DEFAULT}"
 
 STATE_DIR="${AUTODJ_STATE_DIR:-$HOME/.volumio-autodj}"
-HISTORY_FILE="$STATE_DIR/history.txt"
+ARTIST_HISTORY_FILE="$STATE_DIR/artist_history.txt"
+TRACK_HISTORY_FILE="$STATE_DIR/track_history.txt"
 DEBUG_LOG="$STATE_DIR/autodj.debug.log"
 
 mkdir -p "$STATE_DIR"
@@ -151,18 +156,23 @@ jq_safe() {
 }
 
 # ---------------------------------------------------------------------------
-# Repeat guard: newline-separated, normalized artist names, most recent
-# last, capped at HISTORY_SIZE entries.
+# Repeat guard: generic newline-separated "recently used" list, most recent
+# entry last, capped at a caller-supplied size. Used for both the artist
+# history (ARTIST_HISTORY_FILE/ARTIST_HISTORY_SIZE, entries are normalized
+# artist names) and the track history (TRACK_HISTORY_FILE/
+# TRACK_HISTORY_SIZE, entries are raw MPD file paths - NOT normalize()'d,
+# since that would fold together distinct files that merely share
+# whitespace/punctuation in their path).
 # ---------------------------------------------------------------------------
 history_contains() {
-  local norm_name="$1"
-  [[ -f "$HISTORY_FILE" ]] || return 1
-  grep -qxF "$norm_name" "$HISTORY_FILE"
+  local file="$1" entry="$2"
+  [[ -f "$file" ]] || return 1
+  grep -qxF "$entry" "$file"
 }
 
 history_add() {
-  local norm_name="$1"
-  touch "$HISTORY_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not touch history file '$HISTORY_FILE'"
+  local file="$1" size="$2" entry="$3"
+  touch "$file" 2>>"$DEBUG_LOG" || log "Warning: could not touch history file '$file'"
   # Written in ONE pass, in place (not via a temp file + "mv") - on some
   # devices (seen in practice: an overlay-root Volumio image where
   # /data/... files get individually tracked as their own overlay mount
@@ -171,15 +181,15 @@ history_add() {
   # command, so under "set -e" it silently killed the ENTIRE script right
   # here on every single run - invisible under cron, since cron's stderr
   # is normally redirected away, with nothing further ever getting
-  # logged. Deduplicates (drop any existing occurrence of this artist so
+  # logged. Deduplicates (drop any existing occurrence of this entry so
   # it moves to the end instead of appearing twice), appends the new
-  # entry, and trims to HISTORY_SIZE, all before ever touching the real
-  # file - then writes the result with "cat > file" (truncate + write to
-  # the existing inode, no rename() involved at all).
-  { grep -vxF "$norm_name" "$HISTORY_FILE" 2>/dev/null || true; printf '%s\n' "$norm_name"; } \
-    | tail -n "$HISTORY_SIZE" > "${HISTORY_FILE}.tmp" 2>>"$DEBUG_LOG"
-  cat "${HISTORY_FILE}.tmp" > "$HISTORY_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not write history file '$HISTORY_FILE' - repeat guard may not persist this run"
-  rm -f "${HISTORY_FILE}.tmp"
+  # entry, and trims to $size, all before ever touching the real file -
+  # then writes the result with "cat > file" (truncate + write to the
+  # existing inode, no rename() involved at all).
+  { grep -vxF "$entry" "$file" 2>/dev/null || true; printf '%s\n' "$entry"; } \
+    | tail -n "$size" > "${file}.tmp" 2>>"$DEBUG_LOG"
+  cat "${file}.tmp" > "$file" 2>>"$DEBUG_LOG" || log "Warning: could not write history file '$file' - repeat guard may not persist this run"
+  rm -f "${file}.tmp"
   return 0
 }
 
@@ -229,9 +239,10 @@ log "Queue: $queue_len tracks, position=$position, remaining after current=$rema
 # queue happens to share an artist with the old history, which costs more
 # than the rare false positive here (manually rewinding to track 1 of the
 # same still-running queue just resets the guard a little early).
-if (( position == 0 )) && [[ -s "$HISTORY_FILE" ]]; then
+if (( position == 0 )) && { [[ -s "$ARTIST_HISTORY_FILE" ]] || [[ -s "$TRACK_HISTORY_FILE" ]]; }; then
   log "Fresh queue detected (position=0) - resetting repeat-guard history from the previous session"
-  : > "$HISTORY_FILE"
+  : > "$ARTIST_HISTORY_FILE"
+  : > "$TRACK_HISTORY_FILE"
 fi
 
 if (( remaining >= QUEUE_LOW_THRESHOLD )); then
@@ -290,7 +301,7 @@ seed_artist="${seed_pool[$(( RANDOM % ${#seed_pool[@]} ))]}"
 
 log "Seed artist (weighted pick from the last $window queue entries): $seed_artist"
 norm_seed="$(normalize "$seed_artist")"
-history_add "$norm_seed"
+history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$norm_seed"
 
 # ---------------------------------------------------------------------------
 # 3. Ask Last.fm for similar artists (most similar first).
@@ -362,7 +373,7 @@ chosen_artist=""
 for cand in "${candidates[@]}"; do
   [[ -z "$cand" ]] && continue
   norm_cand="$(normalize "$cand")"
-  if history_contains "$norm_cand"; then
+  if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
     log "Skipping '$cand' (recently used, repeat guard)"
     continue
   fi
@@ -417,7 +428,7 @@ try_alternate_seed() {
   for cand in "${candidates[@]}"; do
     [[ -z "$cand" ]] && continue
     norm_cand="$(normalize "$cand")"
-    if history_contains "$norm_cand"; then
+    if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
       log "Retry: skipping '$cand' (recently used, repeat guard)"
       continue
     fi
@@ -486,7 +497,7 @@ if [[ -z "$chosen_artist" ]]; then
       # "|| true": under "set -e", grep finding no match (exit 1) would
       # otherwise abort the whole script right here instead of just
       # leaving line_no empty for the "not in history at all" case below.
-      line_no="$(grep -nxF "$norm_cand" "$HISTORY_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+      line_no="$(grep -nxF "$norm_cand" "$ARTIST_HISTORY_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)"
       [[ -z "$line_no" ]] && line_no=0
       if (( line_no < fallback_line )); then
         fallback_line=$line_no
@@ -595,7 +606,27 @@ if (( ${#files[@]} == 0 )); then
   exit 0
 fi
 
-picked_index=$(( RANDOM % ${#files[@]} ))
+# Prefer a track that isn't in the recent track history, so the exact
+# same song doesn't repeat within the last TRACK_HISTORY_SIZE additions -
+# the artist itself repeating sooner than that is fine (that's what the
+# separate, normally-shorter ARTIST_HISTORY_SIZE controls). Falls back to
+# the full set if every local track by this artist was used recently
+# (small local catalog for them) - a repeated track is still better than
+# skipping this run entirely.
+eligible_indices=()
+for (( i = 0; i < ${#files[@]}; i++ )); do
+  if ! history_contains "$TRACK_HISTORY_FILE" "${files[$i]}"; then
+    eligible_indices+=("$i")
+  fi
+done
+
+if (( ${#eligible_indices[@]} == 0 )); then
+  log "All ${#files[@]} local track(s) by '$chosen_artist' are in the recent track history - repeating one anyway"
+  picked_index=$(( RANDOM % ${#files[@]} ))
+else
+  picked_index="${eligible_indices[$(( RANDOM % ${#eligible_indices[@]} ))]}"
+fi
+
 picked_file="${files[$picked_index]}"
 picked_title="${titles[$picked_index]}"
 picked_album="${albums[$picked_index]}"
@@ -647,4 +678,5 @@ add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/jso
 }
 
 log "Added '$picked_file' (artist: $chosen_artist) to the queue - response: $add_response"
-history_add "$(normalize "$chosen_artist")"
+history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$(normalize "$chosen_artist")"
+history_add "$TRACK_HISTORY_FILE" "$TRACK_HISTORY_SIZE" "$picked_file"
