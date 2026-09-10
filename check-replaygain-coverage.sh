@@ -80,13 +80,39 @@ mpd_raw_query() {
   printf '%s' "$reply"
 }
 
-echo "Enumerating library via 'listallinfo' ..." >&2
+echo "Enumerating library via 'lsinfo' + per-directory 'listallinfo' ..." >&2
 
 # Sent via mpd_raw_query, NOT "mpc listallinfo" - confirmed on the user's
 # real device that mpc 0.26 doesn't expose "listallinfo" as a subcommand
 # at all ("unknown command"), even though it's a perfectly normal native
 # MPD protocol command. Same lesson as dropping "nc" above: go straight to
 # the protocol instead of assuming a particular mpc version's CLI surface.
+#
+# A SINGLE "listallinfo" call for the whole library (no path argument)
+# was also tried first and confirmed, on the same real device, to
+# silently under-count a large library (12354 of 27331 actual tracks) -
+# no error, just a truncated response. Splitting into one
+# "listallinfo <dir>" call per TOP-LEVEL directory (INTERNAL/USB/NAS -
+# via "lsinfo" with no argument, which lists just those without
+# recursing) keeps each individual response far smaller, and each chunk
+# is checked for a proper trailing "OK" so a still-truncated chunk gets
+# reported instead of silently under-counting again.
+top_level_dirs=()
+lsinfo_reply="$(mpd_raw_query "lsinfo")" || {
+  echo "Error: could not reach MPD at $MPD_HOST:$MPD_PORT" >&2
+  exit 1
+}
+while IFS= read -r line; do
+  case "$line" in
+    "directory: "*) top_level_dirs+=("${line#directory: }") ;;
+  esac
+done <<< "$lsinfo_reply"
+
+if (( ${#top_level_dirs[@]} == 0 )); then
+  echo "No top-level directories found via 'lsinfo' - nothing to check." >&2
+  exit 0
+fi
+
 files=()
 artists=()
 albums=()
@@ -102,25 +128,36 @@ flush_current() {
   fi
 }
 
-listing="$(mpd_raw_query "listallinfo")" || {
-  echo "Error: could not reach MPD at $MPD_HOST:$MPD_PORT" >&2
-  exit 1
+parse_listallinfo_chunk() {
+  local chunk="$1"
+  while IFS= read -r line; do
+    case "$line" in
+      "file: "*)
+        flush_current
+        cur_file="${line#file: }"
+        cur_artist=""
+        cur_album=""
+        cur_title=""
+        ;;
+      "Artist: "*) cur_artist="${line#Artist: }" ;;
+      "Album: "*)  cur_album="${line#Album: }" ;;
+      "Title: "*)  cur_title="${line#Title: }" ;;
+    esac
+  done <<< "$chunk"
 }
 
-while IFS= read -r line; do
-  case "$line" in
-    "file: "*)
-      flush_current
-      cur_file="${line#file: }"
-      cur_artist=""
-      cur_album=""
-      cur_title=""
-      ;;
-    "Artist: "*) cur_artist="${line#Artist: }" ;;
-    "Album: "*)  cur_album="${line#Album: }" ;;
-    "Title: "*)  cur_title="${line#Title: }" ;;
-  esac
-done <<< "$listing"
+for dir in "${top_level_dirs[@]}"; do
+  echo "  scanning '$dir' ..." >&2
+  chunk="$(mpd_raw_query "listallinfo $(mpd_quote "$dir")")" || {
+    echo "Warning: could not reach MPD while listing '$dir' - skipping" >&2
+    continue
+  }
+  last_line="$(printf '%s' "$chunk" | tail -n 1)"
+  if [[ "$last_line" != "OK" ]]; then
+    echo "Warning: response for '$dir' did not end with 'OK' - it may have been truncated (large subtree, or MPD dropped the connection mid-response). Track count for this directory may be incomplete." >&2
+  fi
+  parse_listallinfo_chunk "$chunk"
+done
 flush_current
 
 total=${#files[@]}
