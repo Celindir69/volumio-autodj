@@ -222,6 +222,14 @@ Off by default - most users manage this setting themselves via Volumio's
 own UI and won't want a background script touching a global playback
 option.
 
+**Not bit-perfect.** MPD applies ReplayGain by scaling the audio samples
+in software (`replay_gain_handler "software"`, MPD's default) before they
+reach the output - by definition no longer a bit-identical copy of the
+source file, however small the correction. If bit-perfect/direct playback
+matters to you, weigh that against the benefit of not having tracks jump
+wildly in loudness during a mixed AutoDJ session, and leave
+`AUTO_REPLAYGAIN` off if bit-perfect wins out for you.
+
 **Not the same setting as Volumio's own "Volume Normalization" toggle**
 in the UI - that one controls MPD's separate `volume_normalization`
 option (an on-the-fly loudness filter, no tags needed, but no live
