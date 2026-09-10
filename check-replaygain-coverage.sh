@@ -89,14 +89,20 @@ echo "Enumerating library via 'lsinfo' + per-directory 'listallinfo' ..." >&2
 # the protocol instead of assuming a particular mpc version's CLI surface.
 #
 # A SINGLE "listallinfo" call for the whole library (no path argument)
-# was also tried first and confirmed, on the same real device, to
-# silently under-count a large library (12354 of 27331 actual tracks) -
-# no error, just a truncated response. Splitting into one
-# "listallinfo <dir>" call per TOP-LEVEL directory (INTERNAL/USB/NAS -
-# via "lsinfo" with no argument, which lists just those without
-# recursing) keeps each individual response far smaller, and each chunk
-# is checked for a proper trailing "OK" so a still-truncated chunk gets
-# reported instead of silently under-counting again.
+# was tried first and confirmed, on a real device, to silently under-count
+# a large library (12354 of 27331 actual tracks) - no error, just a
+# truncated response. A flat split into one "listallinfo <dir>" call per
+# TOP-LEVEL directory was tried next, but doesn't help when nearly
+# everything lives under a single one of those (also confirmed on a real
+# device) - that one directory's own listallinfo call is just as likely to
+# get truncated in turn. scan_dir() below instead recurses ADAPTIVELY: on
+# a truncated response it re-lists that same directory's own
+# subdirectories (via "lsinfo <dir>") and retries each of THOSE
+# separately, splitting deeper and deeper whenever needed regardless of
+# how unevenly the library happens to be laid out, until every individual
+# chunk actually completes - or, at a leaf directory with no
+# subdirectories left to split into, falls back to the partial chunk with
+# a warning naming exactly which directory is affected.
 top_level_dirs=()
 lsinfo_reply="$(mpd_raw_query "lsinfo")" || {
   echo "Error: could not reach MPD at $MPD_HOST:$MPD_PORT" >&2
@@ -146,17 +152,55 @@ parse_listallinfo_chunk() {
   done <<< "$chunk"
 }
 
-for dir in "${top_level_dirs[@]}"; do
+# Recursive: on a truncated "listallinfo <dir>" response, splits into
+# <dir>'s own subdirectories and retries each separately (see the comment
+# above) instead of accepting a partial chunk, as many levels deep as it
+# takes. MAX_SCAN_DEPTH bounds the recursion - real folder nesting never
+# gets remotely close to it, it's just insurance against a pathological
+# structure (or a misbehaving MPD reply) causing an unbounded loop instead
+# of a bounded, reported failure.
+MAX_SCAN_DEPTH=12
+
+scan_dir() {
+  local dir="$1" depth="${2:-0}" chunk last_line lsinfo_chunk subdirs=() sub line
+
+  if (( depth > MAX_SCAN_DEPTH )); then
+    echo "Warning: '$dir' is more than $MAX_SCAN_DEPTH levels deep into repeated splitting - giving up on it rather than recursing indefinitely. Track count for it may be incomplete." >&2
+    return
+  fi
+
   echo "  scanning '$dir' ..." >&2
   chunk="$(mpd_raw_query "listallinfo $(mpd_quote "$dir")")" || {
     echo "Warning: could not reach MPD while listing '$dir' - skipping" >&2
-    continue
+    return
   }
+
   last_line="$(printf '%s' "$chunk" | tail -n 1)"
-  if [[ "$last_line" != "OK" ]]; then
-    echo "Warning: response for '$dir' did not end with 'OK' - it may have been truncated (large subtree, or MPD dropped the connection mid-response). Track count for this directory may be incomplete." >&2
+  if [[ "$last_line" == "OK" ]]; then
+    parse_listallinfo_chunk "$chunk"
+    return
   fi
-  parse_listallinfo_chunk "$chunk"
+
+  lsinfo_chunk="$(mpd_raw_query "lsinfo $(mpd_quote "$dir")")" || lsinfo_chunk=""
+  while IFS= read -r line; do
+    case "$line" in
+      "directory: "*) subdirs+=("${line#directory: }") ;;
+    esac
+  done <<< "$lsinfo_chunk"
+
+  if (( ${#subdirs[@]} > 0 )); then
+    echo "  '$dir' response looked truncated - splitting into ${#subdirs[@]} subdirectory/subdirectories..." >&2
+    for sub in "${subdirs[@]}"; do
+      scan_dir "$sub" $(( depth + 1 ))
+    done
+  else
+    echo "Warning: '$dir' response did not end with 'OK' and has no subdirectories left to split into - track count for it may be incomplete." >&2
+    parse_listallinfo_chunk "$chunk"
+  fi
+}
+
+for dir in "${top_level_dirs[@]}"; do
+  scan_dir "$dir"
 done
 flush_current
 
