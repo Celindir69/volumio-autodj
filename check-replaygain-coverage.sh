@@ -32,7 +32,7 @@ MPD_HOST="${MPD_HOST:-localhost}"
 MPD_PORT="${MPD_PORT:-6600}"
 OUTPUT_TSV="${OUTPUT_TSV:-$PWD/replaygain_coverage.tsv}"
 
-for tool in mpc nc; do
+for tool in mpc; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Error: '$tool' is required but not found" >&2
     exit 1
@@ -46,11 +46,36 @@ mpd_quote() {
   printf '"%s"' "$s"
 }
 
-# "|| true": a single flaky connection must not abort a scan that might be
-# thousands of files deep - treated the same as "no comments found" below,
-# same defensive reasoning as jq_safe() in the AutoDJ scripts.
+# No external "nc" dependency - confirmed missing on at least one real
+# Volumio device this was tested against, unlike mpc which Volumio always
+# ships (it's how Volumio itself talks to its own MPD). Bash's own
+# /dev/tcp pseudo-device (built into bash - nothing extra to install)
+# is enough for MPD's plain-text protocol, unlike the cross-machine
+# volumio-autodj.sh where "nc" specifically sidesteps an mpc/libmpdclient
+# version mismatch that doesn't apply here (this always runs against
+# Volumio's own mpc talking to its own MPD).
+#
+# A single flaky connection must not abort a scan that might be thousands
+# of files deep - every step here is defensively "|| return 1", treated
+# the same as "no comments found" by the caller, same reasoning as
+# jq_safe() in the AutoDJ scripts.
+#
+# "{ exec 3<>...; } 2>/dev/null" (a brace GROUP, not a subshell) rather
+# than "exec 3<>... 2>/dev/null" directly - confirmed bash prints its own
+# "connect: Connection refused" diagnostic straight to the real stderr
+# regardless of a redirect placed on the failing exec statement itself
+# (the redirection never "takes" since it's part of what's failing); a
+# brace group's redirection applies to everything inside it without that
+# timing problem, while - unlike a real subshell "( ... )" - still runs in
+# THIS shell, so fd 3 stays open afterward for the rest of the function.
 mpd_raw_query() {
-  printf '%s\nclose\n' "$1" | nc -w 10 "$MPD_HOST" "$MPD_PORT" 2>/dev/null || true
+  local cmd="$1" reply=""
+  { exec 3<>"/dev/tcp/$MPD_HOST/$MPD_PORT"; } 2>/dev/null || return 1
+  printf '%s\nclose\n' "$cmd" >&3 2>/dev/null || { exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null; return 1; }
+  reply="$(cat <&3 2>/dev/null)"
+  exec 3<&- 2>/dev/null
+  exec 3>&- 2>/dev/null
+  printf '%s' "$reply"
 }
 
 echo "Enumerating library via 'mpc listallinfo' ..." >&2
@@ -131,7 +156,7 @@ for (( i = 0; i < total; i++ )); do
   al="${albums[$i]}"
   t="${titles[$i]}"
 
-  comments="$(mpd_raw_query "readcomments $(mpd_quote "$f")")"
+  comments="$(mpd_raw_query "readcomments $(mpd_quote "$f")")" || comments=""
 
   has_track=0
   has_album=0
