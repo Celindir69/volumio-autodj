@@ -222,6 +222,38 @@ Off by default - most users manage this setting themselves via Volumio's
 own UI and won't want a background script touching a global playback
 option.
 
+**Not the same setting as Volumio's own "Volume Normalization" toggle**
+in the UI - that one controls MPD's separate `volume_normalization`
+option (an on-the-fly loudness filter, no tags needed, but no live
+runtime command either - changing it means rewriting mpd.conf and
+restarting MPD, too disruptive to automate on a running queue). What this
+script controls is MPD's tag-based **ReplayGain** (`replay_gain_mode`)
+instead - a fixed, precomputed per-track/album gain read from the file's
+own tags, switchable live with no playback interruption, but only
+effective on files that actually carry `REPLAYGAIN_TRACK_GAIN`/
+`REPLAYGAIN_ALBUM_GAIN` tags. Run `check-replaygain-coverage.sh` (see
+below) to see how much of your library actually has them.
+
+### Checking ReplayGain tag coverage
+
+`check-replaygain-coverage.sh` is a standalone, one-off diagnostic - not
+run periodically like the AutoDJ scripts. It scans your whole library and
+reports how many tracks (and which albums) actually carry ReplayGain
+tags, since `AUTO_REPLAYGAIN` above has no effect on files that lack
+them. Run it directly on Volumio via SSH:
+
+```bash
+chmod +x check-replaygain-coverage.sh
+./check-replaygain-coverage.sh
+```
+
+Defaults to `MPD_HOST=localhost`; override `MPD_HOST`/`MPD_PORT` to point
+it at a different device. For a large library this can take a while (MPD
+has no bulk way to query ReplayGain tags - it's one `readcomments`
+round-trip per file); progress is printed every 200 tracks. Writes a
+per-file `replaygain_coverage.tsv` (path configurable via `OUTPUT_TSV`)
+alongside the console summary.
+
 ### Notes / limitations
 
 - Only handles **appending** to the queue - it never removes or reorders
