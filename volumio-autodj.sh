@@ -70,6 +70,14 @@ SEED_WINDOW_SIZE="${SEED_WINDOW_SIZE:-5}"
 # least-recently-used candidate - see step 4b below.
 MAX_SEED_RETRIES="${MAX_SEED_RETRIES:-2}"
 
+# When "on", the script also manages MPD's volume normalization (replay
+# gain) automatically: switches it to "track" mode once AutoDJ actually
+# starts mixing a new artist into the queue, and back to "off" at the next
+# fresh-queue reset (see step 1 below and "Volume normalization" in
+# README.md). Off by default - most users manage this setting themselves
+# and don't expect a background script to touch a global playback option.
+AUTO_REPLAYGAIN="$(printf '%s' "${AUTO_REPLAYGAIN:-off}" | tr '[:upper:]' '[:lower:]')"
+
 # Same idea as SMART_PLAYLISTS_URI_PREFIXES in volumio-smart-playlists.sh -
 # maps the first path segment MPD reports for a track to the prefix needed
 # to build a Volumio playlist/queue "uri". Kept independent (own env var)
@@ -83,6 +91,7 @@ URI_PREFIXES_RAW="${AUTODJ_URI_PREFIXES:-$AUTODJ_URI_PREFIXES_DEFAULT}"
 STATE_DIR="${AUTODJ_STATE_DIR:-$HOME/.volumio-autodj}"
 ARTIST_HISTORY_FILE="$STATE_DIR/artist_history.txt"
 TRACK_HISTORY_FILE="$STATE_DIR/track_history.txt"
+REPLAYGAIN_STATE_FILE="$STATE_DIR/replaygain_state.txt"
 DEBUG_LOG="$STATE_DIR/autodj.debug.log"
 
 mkdir -p "$STATE_DIR"
@@ -193,6 +202,79 @@ history_add() {
   return 0
 }
 
+mpd_quote() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  printf '"%s"' "$s"
+}
+
+# Sends one command over a fresh MPD connection and prints the raw
+# response. "close" tells MPD to close the connection once it has sent
+# the reply, so "nc" exits on its own instead of needing a fixed wait.
+mpd_raw_query() {
+  printf '%s\nclose\n' "$1" | nc -w 10 "$MPD_HOST" "$MPD_PORT" 2>>"$DEBUG_LOG"
+}
+
+# ---------------------------------------------------------------------------
+# Volume normalization (replay gain) auto-management - optional
+# (AUTO_REPLAYGAIN=on), off by default. Only touches MPD's global replay
+# gain mode at two points: replaygain_sync() turns it on ("track" mode)
+# once AutoDJ actually adds a track to the queue, and
+# replaygain_reset_tracking() turns it back "off" at the next fresh-queue
+# reset (step 1 below) - never on every single tick. Before acting,
+# replaygain_sync() compares MPD's CURRENT mode against what this script
+# itself last set (in REPLAYGAIN_STATE_FILE): if they differ, something
+# else (almost certainly you, manually) changed it since - leave it alone
+# rather than fight a deliberate choice, until the next fresh-queue reset
+# resumes automatic management from a clean slate.
+# ---------------------------------------------------------------------------
+replaygain_query() {
+  # MPD's native "replay_gain_status" reply looks like:
+  #   replay_gain_mode: off
+  #   OK
+  mpd_raw_query "replay_gain_status" | sed -n 's/^replay_gain_mode: //p'
+}
+
+replaygain_set() {
+  mpd_raw_query "replay_gain_mode $1" >/dev/null
+}
+
+replaygain_sync() {
+  local desired="$1" last_set="" current
+
+  [[ "$AUTO_REPLAYGAIN" == "on" ]] || return 0
+
+  [[ -f "$REPLAYGAIN_STATE_FILE" ]] && last_set="$(cat "$REPLAYGAIN_STATE_FILE" 2>/dev/null)"
+
+  current="$(replaygain_query)"
+  if [[ -z "$current" ]]; then
+    log "Volume normalization: could not read MPD's current replay gain mode - leaving it alone"
+    return 0
+  fi
+
+  if [[ -n "$last_set" && "$current" != "$last_set" ]]; then
+    log "Volume normalization: current mode '$current' differs from what this script last set ('$last_set') - looks like a manual change, leaving it alone until the next fresh queue"
+    return 0
+  fi
+
+  if [[ "$current" != "$desired" ]]; then
+    replaygain_set "$desired"
+    log "Volume normalization: set replay gain mode to '$desired' (was '$current')"
+  fi
+  printf '%s' "$desired" > "$REPLAYGAIN_STATE_FILE" 2>>"$DEBUG_LOG"
+}
+
+# Called on a fresh-queue reset: this IS the designated point where
+# automatic management resumes regardless of any manual change since -
+# clears the tracking file first so replaygain_sync() above has nothing to
+# compare against and just sets "off" outright.
+replaygain_reset_tracking() {
+  [[ "$AUTO_REPLAYGAIN" == "on" ]] || return 0
+  rm -f "$REPLAYGAIN_STATE_FILE" 2>/dev/null || true
+  replaygain_sync "off"
+}
+
 # ---------------------------------------------------------------------------
 # 1. Check Volumio's current playback state and queue.
 # ---------------------------------------------------------------------------
@@ -243,6 +325,7 @@ if (( position == 0 )) && { [[ -s "$ARTIST_HISTORY_FILE" ]] || [[ -s "$TRACK_HIS
   log "Fresh queue detected (position=0) - resetting repeat-guard history from the previous session"
   : > "$ARTIST_HISTORY_FILE"
   : > "$TRACK_HISTORY_FILE"
+  replaygain_reset_tracking
 fi
 
 if (( remaining >= QUEUE_LOW_THRESHOLD )); then
@@ -537,20 +620,6 @@ fi
 # how old Volumio's bundled MPD is.
 norm_chosen="$(normalize "$chosen_artist")"
 
-mpd_quote() {
-  local s="$1"
-  s="${s//\\/\\\\}"
-  s="${s//\"/\\\"}"
-  printf '"%s"' "$s"
-}
-
-# Sends one command over a fresh MPD connection and prints the raw
-# response. "close" tells MPD to close the connection once it has sent
-# the reply, so "nc" exits on its own instead of needing a fixed wait.
-mpd_raw_query() {
-  printf '%s\nclose\n' "$1" | nc -w 10 "$MPD_HOST" "$MPD_PORT" 2>>"$DEBUG_LOG"
-}
-
 # Parses a find/search response (repeated "file: ..." blocks, each with
 # assorted "Tag: value" lines) and appends the path/title/album of every
 # block whose Artist line normalizes to exactly the target artist, in
@@ -680,3 +749,4 @@ add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/jso
 log "Added '$picked_file' (artist: $chosen_artist) to the queue - response: $add_response"
 history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$(normalize "$chosen_artist")"
 history_add "$TRACK_HISTORY_FILE" "$TRACK_HISTORY_SIZE" "$picked_file"
+replaygain_sync "track"

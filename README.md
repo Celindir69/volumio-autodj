@@ -183,6 +183,9 @@ the small repeat-guard history.
   initial seed is blocked by the repeat guard, how many additional random
   seed artists from the queue to retry with before falling back to the
   least-recently-used candidate - see "Notes / limitations" below.
+- `AUTO_REPLAYGAIN` (default `off`) - if `on`, the script also manages
+  MPD's volume normalization automatically - see "Volume normalization"
+  below.
 - `AUTODJ_URI_PREFIXES` - maps the first path segment MPD reports for a
   track (its source label, e.g. `INTERNAL`/`USB`/`NAS`) to the prefix
   needed to build a Volumio queue `uri`. Newline-separated
@@ -194,6 +197,30 @@ the small repeat-guard history.
   ```
 - `AUTODJ_STATE_DIR` (default `~/.volumio-autodj`) - where the repeat-guard
   histories and debug log are stored, on the device this script runs on.
+
+### Volume normalization
+
+A mixed AutoDJ queue jumps between recordings with very different mastering
+loudness, unlike a deliberately curated album/playlist where the levels
+were probably already consistent - so it can be worth turning Volumio's
+volume normalization on for AutoDJ-extended listening even if you normally
+leave it off. Set `AUTO_REPLAYGAIN=on` to have the script manage this for
+you automatically:
+
+- Switches MPD's replay gain mode to `track` the first time AutoDJ actually
+  adds a track to the queue (i.e. once it's genuinely "mixed").
+- Switches it back to `off` at the next freshly-started queue (the same
+  `position == 0` signal that resets the repeat guard, see above) - back
+  to your own normal setting for deliberately curated listening.
+- Never touches it on every single tick, and never overrides a manual
+  change: before acting, it compares MPD's current mode against what it
+  itself last set. If they differ, you (or something else) changed it
+  since - it backs off and leaves your change alone until the next fresh
+  queue resets tracking and resumes automatic management.
+
+Off by default - most users manage this setting themselves via Volumio's
+own UI and won't want a background script touching a global playback
+option.
 
 ### Notes / limitations
 
@@ -270,7 +297,7 @@ the small repeat-guard history.
 
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
-`SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`, `MAX_SEED_RETRIES`,
+`SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
 `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:
