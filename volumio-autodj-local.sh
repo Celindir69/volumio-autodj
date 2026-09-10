@@ -225,9 +225,11 @@ history_add() {
 # resumes automatic management from a clean slate.
 # ---------------------------------------------------------------------------
 replaygain_query() {
-  # "mpc replaygain" (no argument) prints the current mode, e.g.:
-  #   replay gain mode is off
-  mpc -h "$MPD_HOST" -p "$MPD_PORT" replaygain 2>>"$DEBUG_LOG" | sed -n 's/^replay gain mode is //p'
+  # "mpc replaygain" (no argument) prints MPD's raw protocol reply
+  # verbatim (confirmed on a real device - Volumio's older bundled mpc
+  # doesn't reformat it into prose), e.g.:
+  #   replay_gain_mode: off
+  mpc -h "$MPD_HOST" -p "$MPD_PORT" replaygain 2>>"$DEBUG_LOG" | sed -n 's/^replay_gain_mode: //p'
 }
 
 replaygain_set() {
