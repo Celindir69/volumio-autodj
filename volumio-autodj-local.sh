@@ -100,6 +100,7 @@ WORK_DIR="${AUTODJ_STATE_DIR:-/data/volumio_autodj_data}"
 ARTIST_HISTORY_FILE="$WORK_DIR/artist_history.txt"
 TRACK_HISTORY_FILE="$WORK_DIR/track_history.txt"
 REPLAYGAIN_STATE_FILE="$WORK_DIR/replaygain_state.txt"
+LAST_POSITION_FILE="$WORK_DIR/last_position.txt"
 DEBUG_LOG="$WORK_DIR/autodj.debug.log"
 
 mkdir -p "$WORK_DIR"
@@ -314,12 +315,28 @@ log "Queue: $queue_len tracks, position=$position, remaining after current=$rema
 # queue happens to share an artist with the old history, which costs more
 # than the rare false positive here (manually rewinding to track 1 of the
 # same still-running queue just resets the guard a little early).
-if (( position == 0 )) && { [[ -s "$ARTIST_HISTORY_FILE" ]] || [[ -s "$TRACK_HISTORY_FILE" ]]; }; then
+#
+# Edge-triggered, not level-triggered: only reset on the TRANSITION into
+# position 0 (last-seen position, from LAST_POSITION_FILE, was something
+# else), not on every run that merely finds position still at 0. The first
+# track of a fresh session often takes longer to play than one check
+# interval, so position can legitimately stay 0 across several runs in a
+# row - reacting to the level rather than the edge would then wipe out the
+# very history AutoDJ just built up during those same runs (confirmed in
+# practice: a track added while position was still 0 got its history
+# entry erased one tick later, making it eligible to repeat far sooner
+# than TRACK_HISTORY_SIZE should have allowed).
+last_position=""
+[[ -f "$LAST_POSITION_FILE" ]] && last_position="$(cat "$LAST_POSITION_FILE" 2>/dev/null)"
+
+if (( position == 0 )) && [[ "$last_position" != "0" ]] && { [[ -s "$ARTIST_HISTORY_FILE" ]] || [[ -s "$TRACK_HISTORY_FILE" ]]; }; then
   log "Fresh queue detected (position=0) - resetting repeat-guard history from the previous session"
   : > "$ARTIST_HISTORY_FILE"
   : > "$TRACK_HISTORY_FILE"
   replaygain_reset_tracking
 fi
+
+printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
 
 if (( remaining >= QUEUE_LOW_THRESHOLD )); then
   log "Enough tracks remaining - nothing to do"
