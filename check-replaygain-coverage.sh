@@ -22,6 +22,15 @@
 # comments directly - one MPD round-trip per file, no bulk query exists.
 # For a large library this can take a while; progress is printed every
 # 200 tracks.
+#
+# No external tools required at all (no mpc, no nc) - talks to MPD
+# directly over its own plain-text protocol via bash's built-in /dev/tcp,
+# for both listing the library and reading each file's comments. Started
+# out using "mpc listallinfo" for the library listing, but mpc 0.26 (a
+# real device this was tested against) doesn't expose "listallinfo" as a
+# subcommand at all, even though it's a perfectly normal native MPD
+# command - going straight to the protocol sidesteps depending on any
+# particular mpc version's CLI surface.
 # =============================================================================
 set -euo pipefail
 
@@ -31,13 +40,6 @@ export LANG=C
 MPD_HOST="${MPD_HOST:-localhost}"
 MPD_PORT="${MPD_PORT:-6600}"
 OUTPUT_TSV="${OUTPUT_TSV:-$PWD/replaygain_coverage.tsv}"
-
-for tool in mpc; do
-  if ! command -v "$tool" >/dev/null 2>&1; then
-    echo "Error: '$tool' is required but not found" >&2
-    exit 1
-  fi
-done
 
 mpd_quote() {
   local s="$1"
@@ -78,8 +80,13 @@ mpd_raw_query() {
   printf '%s' "$reply"
 }
 
-echo "Enumerating library via 'mpc listallinfo' ..." >&2
+echo "Enumerating library via 'listallinfo' ..." >&2
 
+# Sent via mpd_raw_query, NOT "mpc listallinfo" - confirmed on the user's
+# real device that mpc 0.26 doesn't expose "listallinfo" as a subcommand
+# at all ("unknown command"), even though it's a perfectly normal native
+# MPD protocol command. Same lesson as dropping "nc" above: go straight to
+# the protocol instead of assuming a particular mpc version's CLI surface.
 files=()
 artists=()
 albums=()
@@ -95,6 +102,11 @@ flush_current() {
   fi
 }
 
+listing="$(mpd_raw_query "listallinfo")" || {
+  echo "Error: could not reach MPD at $MPD_HOST:$MPD_PORT" >&2
+  exit 1
+}
+
 while IFS= read -r line; do
   case "$line" in
     "file: "*)
@@ -108,12 +120,12 @@ while IFS= read -r line; do
     "Album: "*)  cur_album="${line#Album: }" ;;
     "Title: "*)  cur_title="${line#Title: }" ;;
   esac
-done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" listallinfo)
+done <<< "$listing"
 flush_current
 
 total=${#files[@]}
 if (( total == 0 )); then
-  echo "No tracks found via 'mpc listallinfo' - nothing to check." >&2
+  echo "No tracks found via 'listallinfo' - nothing to check." >&2
   exit 0
 fi
 
