@@ -336,9 +336,20 @@ systemd 220+, not a safe assumption on an older device.)
 idea - just point `ExecStart` at that script instead, still with
 `--watch-boundary`.) Must share the exact same `AUTODJ_STATE_DIR` (and
 `AUTO_REPLAYGAIN`/`AUTO_CROSSFADE` values) as the main cron/systemd-timer
-job - it only reads the state files that job writes, it doesn't refill the
-queue or manage the repeat guard itself. Optional: if you don't run it,
-everything still works exactly as before, just with the coarser timing.
+job - it reads the mixed-content boundary that job writes, it doesn't
+refill the queue or manage the repeat guard itself. Optional: if you don't
+run it, everything still works exactly as before, just with the coarser
+timing.
+
+It also detects a freshly-started queue (`position` dropping back to `0`)
+on its own, independently of the main tick, and reacts immediately -
+clearing the boundary and turning replay gain/crossfade back off - rather
+than only reacting once the main tick's own (much less frequent) check
+gets around to it. Without that, a stale boundary left over from the
+*previous* mixed session could otherwise incorrectly re-trigger replay
+gain/crossfade on fresh, deliberately curated content, if the new queue's
+position happened to climb back up past that old boundary value before the
+main tick's next scheduled run.
 
 ### Checking ReplayGain tag coverage
 

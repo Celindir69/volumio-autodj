@@ -135,6 +135,7 @@ REPLAYGAIN_STATE_FILE="$WORK_DIR/replaygain_state.txt"
 CROSSFADE_STATE_FILE="$WORK_DIR/crossfade_state.txt"
 LAST_POSITION_FILE="$WORK_DIR/last_position.txt"
 MIXED_BOUNDARY_FILE="$WORK_DIR/mixed_boundary.txt"
+WATCH_LAST_POSITION_FILE="$WORK_DIR/watch_last_position.txt"
 DEBUG_LOG="$WORK_DIR/autodj.debug.log"
 
 mkdir -p "$WORK_DIR"
@@ -417,15 +418,40 @@ WATCH_INTERVAL="${AUTODJ_WATCH_INTERVAL:-5}"
 
 boundary_watch_tick() {
   [[ "$AUTO_REPLAYGAIN" == "on" || "$AUTO_CROSSFADE" != "off" ]] || return 0
-  [[ -f "$MIXED_BOUNDARY_FILE" ]] || return 0
 
-  local mixed_boundary watch_state_json current_position
-  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
-  [[ -n "$mixed_boundary" ]] || return 0
-
+  local watch_state_json current_position
   watch_state_json="$(curl -sf --max-time 5 "${api_base}/getstate")" || return 0
   current_position="$(jq_safe '.position // empty' '' "$watch_state_json")"
   [[ -n "$current_position" ]] || return 0
+
+  # Own, faster-than-the-main-tick fresh-queue detection - same
+  # edge-triggered "transition INTO position 0" pattern as the main tick's
+  # (step 1 below), but tracked in its OWN file (WATCH_LAST_POSITION_FILE),
+  # never LAST_POSITION_FILE - sharing that file would let whichever of the
+  # two processes happens to observe the transition first "consume" it,
+  # silently skipping the main tick's OWN reset of the repeat-guard
+  # history. Needed because relying solely on the main tick to clear
+  # MIXED_BOUNDARY_FILE leaves a window - up to a full main-tick interval -
+  # where a STALE boundary left over from the previous mixed session could
+  # incorrectly re-trigger replay gain/crossfade on fresh, deliberately
+  # curated content, if the new queue's position happens to climb back up
+  # past that old boundary value before the main tick gets a chance to run.
+  local watch_last_position=""
+  if [[ -f "$WATCH_LAST_POSITION_FILE" ]]; then
+    watch_last_position="$(cat "$WATCH_LAST_POSITION_FILE" 2>/dev/null)" || true
+  fi
+  if (( current_position == 0 )) && [[ "$watch_last_position" != "0" ]] && [[ -f "$MIXED_BOUNDARY_FILE" ]]; then
+    log "Boundary watcher: fresh queue detected (position=0) - clearing mixed-content boundary and resetting replay gain/crossfade"
+    rm -f "$MIXED_BOUNDARY_FILE" 2>/dev/null || true
+    replaygain_reset_tracking
+    crossfade_reset_tracking
+  fi
+  printf '%s' "$current_position" > "$WATCH_LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || true
+
+  [[ -f "$MIXED_BOUNDARY_FILE" ]] || return 0
+  local mixed_boundary
+  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
+  [[ -n "$mixed_boundary" ]] || return 0
 
   if (( current_position >= mixed_boundary )); then
     replaygain_sync "track"
