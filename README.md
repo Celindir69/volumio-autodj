@@ -186,6 +186,9 @@ the small repeat-guard history.
 - `AUTO_REPLAYGAIN` (default `off`) - if `on`, the script also manages
   MPD's volume normalization automatically - see "Volume normalization"
   below.
+- `AUTO_CROSSFADE` (default `off`) - if set to a whole number of seconds,
+  the script also manages MPD's crossfade automatically - see "Crossfade"
+  below.
 - `AUTODJ_URI_PREFIXES` - maps the first path segment MPD reports for a
   track (its source label, e.g. `INTERNAL`/`USB`/`NAS`) to the prefix
   needed to build a Volumio queue `uri`. Newline-separated
@@ -241,6 +244,29 @@ own tags, switchable live with no playback interruption, but only
 effective on files that actually carry `REPLAYGAIN_TRACK_GAIN`/
 `REPLAYGAIN_ALBUM_GAIN` tags. Run `check-replaygain-coverage.sh` (see
 below) to see how much of your library actually has them.
+
+### Crossfade
+
+Same idea and same on/off management as volume normalization above, for
+MPD's crossfade instead - useful if you'd like tracks to blend into each
+other during a mixed AutoDJ session even if you normally play albums
+without any overlap. Set `AUTO_CROSSFADE=<seconds>` (e.g. `AUTO_CROSSFADE=5`)
+to have the script manage this for you automatically:
+
+- Switches MPD's crossfade to that many seconds the first time AutoDJ
+  actually adds a track to the queue (i.e. once it's genuinely "mixed").
+- Switches it back to `0` at the next freshly-started queue - back to no
+  crossfade for deliberately curated listening.
+- Never touches it on every single tick, and never overrides a manual
+  change, exactly like volume normalization above: before acting, it
+  compares MPD's current crossfade setting against what it itself last
+  set, and backs off if they differ until the next fresh queue resumes
+  automatic management.
+
+Off by default. Unlike `volume_normalization`, MPD's crossfade **is** a
+live, runtime-settable value (no mpd.conf edit or restart needed), so this
+one is not fighting the same restart-based limitation volume
+normalization has.
 
 ### Checking ReplayGain tag coverage
 
@@ -344,7 +370,7 @@ alongside the console summary.
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
 `SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
-`AUTODJ_URI_PREFIXES`), but runs
+`AUTO_CROSSFADE`, `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:
 

@@ -83,6 +83,17 @@ MAX_SEED_RETRIES="${MAX_SEED_RETRIES:-2}"
 # and don't expect a background script to touch a global playback option.
 AUTO_REPLAYGAIN="$(printf '%s' "${AUTO_REPLAYGAIN:-off}" | tr '[:upper:]' '[:lower:]')"
 
+# Same idea as AUTO_REPLAYGAIN above, same on/off management (see step 1
+# and the successful-add step below) - "off" (default) leaves MPD's
+# crossfade setting alone, any whole number of seconds enables it with
+# that duration once AutoDJ starts mixing, back to 0 at the next
+# fresh-queue reset.
+AUTO_CROSSFADE="$(printf '%s' "${AUTO_CROSSFADE:-off}" | tr '[:upper:]' '[:lower:]')"
+if [[ "$AUTO_CROSSFADE" != "off" ]] && ! [[ "$AUTO_CROSSFADE" =~ ^[0-9]+$ ]]; then
+  echo "Error: AUTO_CROSSFADE must be 'off' or a whole number of seconds, got '$AUTO_CROSSFADE'" >&2
+  exit 1
+fi
+
 # Same idea as SMART_PLAYLISTS_URI_PREFIXES in volumio-smart-playlists.sh -
 # maps the first path segment MPD reports for a track to the prefix needed
 # to build a Volumio playlist/queue "uri". Kept independent (own env var)
@@ -100,6 +111,7 @@ WORK_DIR="${AUTODJ_STATE_DIR:-/data/volumio_autodj_data}"
 ARTIST_HISTORY_FILE="$WORK_DIR/artist_history.txt"
 TRACK_HISTORY_FILE="$WORK_DIR/track_history.txt"
 REPLAYGAIN_STATE_FILE="$WORK_DIR/replaygain_state.txt"
+CROSSFADE_STATE_FILE="$WORK_DIR/crossfade_state.txt"
 LAST_POSITION_FILE="$WORK_DIR/last_position.txt"
 DEBUG_LOG="$WORK_DIR/autodj.debug.log"
 
@@ -272,6 +284,82 @@ replaygain_reset_tracking() {
 }
 
 # ---------------------------------------------------------------------------
+# Crossfade auto-management - optional (AUTO_CROSSFADE=<seconds>), off by
+# default. Exactly the same on/off pattern as replaygain above, on the
+# same two triggers, with the same manual-override detection - only the
+# query/set mechanism differs. Talks to MPD's raw protocol directly via
+# bash's built-in /dev/tcp (same approach already proven in
+# check-replaygain-coverage.sh) rather than "mpc crossfade", since unlike
+# "mpc replaygain" - confirmed working on a real device - crossfade has no
+# dedicated mpc query subcommand to fall back on if guessed wrong; going
+# straight to the protocol sidesteps that risk entirely. Unlike
+# replay_gain_status, MPD has no dedicated query command for crossfade
+# either - the current value is a field in the general "status" reply
+# ("xfade: N"), which MPD only includes at all when crossfade is actually
+# nonzero; its absence is read as 0, not as a failed query.
+# ---------------------------------------------------------------------------
+# "{ exec 3<>...; } 2>/dev/null" (a brace GROUP, not a subshell): bash
+# prints its own "connect: Connection refused" diagnostic straight to the
+# real stderr regardless of a redirect placed on the failing exec
+# statement itself (the redirection never "takes" since it's part of what
+# fails); a brace group's redirection applies to everything inside it
+# without that timing problem, while - unlike a real subshell "( ... )" -
+# still runs in THIS shell, so fd 3 stays open afterward.
+mpd_raw_query() {
+  local cmd="$1" reply=""
+  { exec 3<>"/dev/tcp/$MPD_HOST/$MPD_PORT"; } 2>/dev/null || return 1
+  printf '%s\nclose\n' "$cmd" >&3 2>/dev/null || { exec 3<&- 2>/dev/null; exec 3>&- 2>/dev/null; return 1; }
+  reply="$(cat <&3 2>/dev/null)"
+  exec 3<&- 2>/dev/null
+  exec 3>&- 2>/dev/null
+  printf '%s' "$reply"
+}
+
+crossfade_query() {
+  local status_reply val
+  status_reply="$(mpd_raw_query "status")" || return 1
+  val="$(printf '%s' "$status_reply" | sed -n 's/^xfade: //p')"
+  printf '%s' "${val:-0}"
+}
+
+crossfade_set() {
+  mpd_raw_query "crossfade $1" >/dev/null
+}
+
+crossfade_sync() {
+  local desired="$1" last_set="" current
+
+  [[ "$AUTO_CROSSFADE" != "off" ]] || return 0
+
+  [[ -f "$CROSSFADE_STATE_FILE" ]] && last_set="$(cat "$CROSSFADE_STATE_FILE" 2>/dev/null)"
+
+  if ! current="$(crossfade_query)"; then
+    log "Crossfade: could not read MPD's current crossfade setting - leaving it alone"
+    return 0
+  fi
+
+  if [[ -n "$last_set" && "$current" != "$last_set" ]]; then
+    log "Crossfade: current value '${current}s' differs from what this script last set ('${last_set}s') - looks like a manual change, leaving it alone until the next fresh queue"
+    return 0
+  fi
+
+  if [[ "$current" != "$desired" ]]; then
+    crossfade_set "$desired"
+    log "Crossfade: set to ${desired}s (was ${current}s)"
+  fi
+  printf '%s' "$desired" > "$CROSSFADE_STATE_FILE" 2>>"$DEBUG_LOG"
+}
+
+# Same role as replaygain_reset_tracking() above - resumes automatic
+# management from a clean slate at the next fresh-queue reset, regardless
+# of any manual change since.
+crossfade_reset_tracking() {
+  [[ "$AUTO_CROSSFADE" != "off" ]] || return 0
+  rm -f "$CROSSFADE_STATE_FILE" 2>/dev/null || true
+  crossfade_sync 0
+}
+
+# ---------------------------------------------------------------------------
 # 1. Check Volumio's current playback state and queue.
 # ---------------------------------------------------------------------------
 api_base="http://${VOLUMIO_HOST}:${VOLUMIO_PORT}/api/v1"
@@ -336,6 +424,7 @@ if (( position == 0 )) && [[ "$last_position" != "0" ]] && { [[ -s "$ARTIST_HIST
   : > "$ARTIST_HISTORY_FILE"
   : > "$TRACK_HISTORY_FILE"
   replaygain_reset_tracking
+  crossfade_reset_tracking
 fi
 
 printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
@@ -727,3 +816,4 @@ log "Added '$picked_file' (artist: $chosen_artist) to the queue - response: $add
 history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$(normalize "$chosen_artist")"
 history_add "$TRACK_HISTORY_FILE" "$TRACK_HISTORY_SIZE" "$picked_file"
 replaygain_sync "track"
+crossfade_sync "$AUTO_CROSSFADE"
