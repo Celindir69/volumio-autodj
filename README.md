@@ -274,6 +274,61 @@ live, runtime-settable value (no mpd.conf edit or restart needed), so this
 one is not fighting the same restart-based limitation volume
 normalization has.
 
+### Avoiding a mid-song volume jump
+
+The main script only checks the queue (and, with it, whether playback has
+reached the mixed-content boundary above) on its own schedule - typically
+every 60-90s via cron/systemd timer. That's fine for refilling the queue,
+but too coarse for switching replay gain/crossfade on: if the boundary is
+actually crossed between two ticks, the setting only gets applied on the
+*next* tick, which can land well into the new track - an audible jump in
+volume mid-song instead of a clean change at the track boundary.
+
+If you have `AUTO_REPLAYGAIN` or `AUTO_CROSSFADE` on, run the script's
+lightweight `--watch-boundary` mode alongside the main one to fix this. It
+does nothing else - no Last.fm calls, no library scans, not even `curl`/
+`jq`/`mpc` unless `AUTO_REPLAYGAIN` needs `mpc` - just a small raw-protocol
+`status` query to MPD every few seconds (`AUTODJ_WATCH_INTERVAL`, default
+`5`) to check whether playback has reached the boundary yet, so the switch
+lands within a few seconds of the actual track change instead of up to a
+full main-tick interval later. Negligible overhead: on an idle tick it's a
+single tiny network round trip, no subprocess beyond that.
+
+Needs to run continuously, so it's a systemd **service**, not a timer:
+
+```ini
+# /etc/systemd/system/volumio-autodj-watch.service
+[Unit]
+Description=Volumio AutoDJ boundary watcher
+After=network.target
+
+[Service]
+Environment=AUTODJ_STATE_DIR=/home/youruser/.volumio-autodj
+Environment=AUTO_REPLAYGAIN=on
+Environment=AUTO_CROSSFADE=5
+# Same VOLUMIO_HOST/MPD_HOST/AUTODJ_WATCH_INTERVAL overrides as the main
+# script - set whichever of these your setup actually needs.
+ExecStart=/usr/bin/env bash /path/to/volumio-autodj.sh --watch-boundary
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now volumio-autodj-watch.service
+```
+
+(For `volumio-autodj-local.sh` running directly on Volumio via SSH, same
+idea - just point `ExecStart` at that script instead, still with
+`--watch-boundary`.) Must share the exact same `AUTODJ_STATE_DIR` (and
+`AUTO_REPLAYGAIN`/`AUTO_CROSSFADE` values) as the main cron/systemd-timer
+job - it only reads the state files that job writes, it doesn't refill the
+queue or manage the repeat guard itself. Optional: if you don't run it,
+everything still works exactly as before, just with the coarser timing.
+
 ### Checking ReplayGain tag coverage
 
 `check-replaygain-coverage.sh` is a standalone, one-off diagnostic - not

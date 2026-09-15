@@ -50,7 +50,27 @@ VOLUMIO_PORT="${VOLUMIO_PORT:-3000}"
 MPD_HOST="${MPD_HOST:-localhost}"
 MPD_PORT="${MPD_PORT:-6600}"
 
-LASTFM_API_KEY="${LASTFM_API_KEY:?Set LASTFM_API_KEY to a free Last.fm API key (https://www.last.fm/api/account/create)}"
+# ---------------------------------------------------------------------------
+# Mode: normal (default) one-shot queue check, or "--watch-boundary" - a
+# lightweight, frequently-run companion loop that ONLY watches for playback
+# reaching the AutoDJ mixed-content boundary and syncs replay gain/crossfade
+# at that moment (see boundary_watch_tick() below). Split out from the main
+# queue-refill logic (still run on its own, much longer, QUEUE_LOW_THRESHOLD-
+# driven interval via cron/systemd) because reacting to a track change
+# promptly needs a short poll interval, while refilling the queue doesn't -
+# running the full heavy logic (Last.fm calls, mpc library scans) that often
+# would be wasteful. See "Avoiding a mid-song volume jump" in README.md.
+# ---------------------------------------------------------------------------
+WATCH_BOUNDARY_ONLY=0
+[[ "${1:-}" == "--watch-boundary" ]] && WATCH_BOUNDARY_ONLY=1
+
+# Not needed in watch mode - only the main queue-refill logic below ever
+# talks to Last.fm.
+if (( WATCH_BOUNDARY_ONLY )); then
+  LASTFM_API_KEY="${LASTFM_API_KEY:-}"
+else
+  LASTFM_API_KEY="${LASTFM_API_KEY:?Set LASTFM_API_KEY to a free Last.fm API key (https://www.last.fm/api/account/create)}"
+fi
 
 # How many tracks may still be left AFTER the currently playing one before
 # a refill is triggered (0 = only refill once the queue is truly empty
@@ -136,7 +156,24 @@ log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$DEBUG_LOG" >&2
 }
 
-for tool in curl jq mpc; do
+# In "--watch-boundary" mode, MPD is talked to directly via mpd_raw_query()
+# (bash's own /dev/tcp, no external tool) for the crossfade side - curl/jq
+# (Volumio/Last.fm REST calls) are never needed there. "mpc" is only needed
+# in that mode if AUTO_REPLAYGAIN is actually on (replaygain still goes
+# through "mpc replaygain" - see the comment above replaygain_query()); skip
+# demanding it otherwise, so a crossfade-only setup on a device without mpc
+# still works. Full mode (no flag) is unaffected and always needs all three.
+# Plain string, not a bash array, checked directly below - avoids
+# "${arr[@]}" on an empty array, which raises "unbound variable" under
+# "set -u" on bash older than 4.4 (same reasoning as this script avoiding
+# "declare -A"/"mapfile" elsewhere).
+if (( WATCH_BOUNDARY_ONLY )); then
+  required_tools=""
+  [[ "$AUTO_REPLAYGAIN" == "on" ]] && required_tools="mpc"
+else
+  required_tools="curl jq mpc"
+fi
+for tool in $required_tools; do
   if ! command -v "$tool" >/dev/null 2>&1; then
     echo "Error: '$tool' is required but not found" >&2
     exit 1
@@ -361,6 +398,47 @@ crossfade_reset_tracking() {
 }
 
 # ---------------------------------------------------------------------------
+# "--watch-boundary" mode: see the header comment near WATCH_BOUNDARY_ONLY
+# above. Polls MPD's own "status" reply directly (its "song:" field is MPD's
+# own current queue position - the same index Volumio's queue is built on
+# top of) rather than going through Volumio's REST API, to keep each poll as
+# cheap as possible: no curl/jq subprocess, just one small raw-protocol
+# round trip - this runs far more often than the main queue-refill tick.
+# ---------------------------------------------------------------------------
+WATCH_INTERVAL="${AUTODJ_WATCH_INTERVAL:-5}"
+
+boundary_watch_tick() {
+  [[ "$AUTO_REPLAYGAIN" == "on" || "$AUTO_CROSSFADE" != "off" ]] || return 0
+  [[ -f "$MIXED_BOUNDARY_FILE" ]] || return 0
+
+  local mixed_boundary status_reply current_position
+  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
+  [[ -n "$mixed_boundary" ]] || return 0
+
+  status_reply="$(mpd_raw_query "status")" || return 0
+  current_position="$(printf '%s' "$status_reply" | sed -n 's/^song: //p')"
+  [[ -n "$current_position" ]] || return 0
+
+  if (( current_position >= mixed_boundary )); then
+    replaygain_sync "track"
+    crossfade_sync "$AUTO_CROSSFADE"
+  fi
+}
+
+run_boundary_watch_loop() {
+  log "Boundary watcher started (polling every ${WATCH_INTERVAL}s)"
+  while true; do
+    boundary_watch_tick
+    sleep "$WATCH_INTERVAL"
+  done
+}
+
+if (( WATCH_BOUNDARY_ONLY )); then
+  run_boundary_watch_loop
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # 1. Check Volumio's current playback state and queue.
 # ---------------------------------------------------------------------------
 api_base="http://${VOLUMIO_HOST}:${VOLUMIO_PORT}/api/v1"
@@ -439,7 +517,7 @@ printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning:
 # mixed-in content is actually reached; syncing immediately on add would
 # incorrectly apply these settings to that original, still-playing content.
 if [[ -f "$MIXED_BOUNDARY_FILE" ]]; then
-  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)"
+  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
   if [[ -n "$mixed_boundary" ]] && (( position >= mixed_boundary )); then
     replaygain_sync "track"
     crossfade_sync "$AUTO_CROSSFADE"
