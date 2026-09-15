@@ -113,6 +113,7 @@ TRACK_HISTORY_FILE="$WORK_DIR/track_history.txt"
 REPLAYGAIN_STATE_FILE="$WORK_DIR/replaygain_state.txt"
 CROSSFADE_STATE_FILE="$WORK_DIR/crossfade_state.txt"
 LAST_POSITION_FILE="$WORK_DIR/last_position.txt"
+MIXED_BOUNDARY_FILE="$WORK_DIR/mixed_boundary.txt"
 DEBUG_LOG="$WORK_DIR/autodj.debug.log"
 
 mkdir -p "$WORK_DIR"
@@ -425,9 +426,25 @@ if (( position == 0 )) && [[ "$last_position" != "0" ]] && { [[ -s "$ARTIST_HIST
   : > "$TRACK_HISTORY_FILE"
   replaygain_reset_tracking
   crossfade_reset_tracking
+  rm -f "$MIXED_BOUNDARY_FILE" 2>/dev/null || true
 fi
 
 printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
+
+# Only actually flip replay gain/crossfade on once PLAYBACK ITSELF reaches
+# the first AutoDJ-added track (MIXED_BOUNDARY_FILE, set below once a track
+# is appended) - not merely once AutoDJ appends it. AutoDJ adds a track as
+# soon as only QUEUE_LOW_THRESHOLD are left, which can still be several
+# tracks (e.g. the tail of an album the user queued) BEFORE the newly
+# mixed-in content is actually reached; syncing immediately on add would
+# incorrectly apply these settings to that original, still-playing content.
+if [[ -f "$MIXED_BOUNDARY_FILE" ]]; then
+  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)"
+  if [[ -n "$mixed_boundary" ]] && (( position >= mixed_boundary )); then
+    replaygain_sync "track"
+    crossfade_sync "$AUTO_CROSSFADE"
+  fi
+fi
 
 if (( remaining >= QUEUE_LOW_THRESHOLD )); then
   log "Enough tracks remaining - nothing to do"
@@ -815,5 +832,8 @@ add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/jso
 log "Added '$picked_file' (artist: $chosen_artist) to the queue - response: $add_response"
 history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$(normalize "$chosen_artist")"
 history_add "$TRACK_HISTORY_FILE" "$TRACK_HISTORY_SIZE" "$picked_file"
-replaygain_sync "track"
-crossfade_sync "$AUTO_CROSSFADE"
+
+if [[ ! -f "$MIXED_BOUNDARY_FILE" ]]; then
+  printf '%s' "$queue_len" > "$MIXED_BOUNDARY_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist mixed-content boundary"
+  log "Marking queue position $queue_len as the start of AutoDJ-mixed content"
+fi

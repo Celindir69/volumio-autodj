@@ -104,6 +104,7 @@ ARTIST_HISTORY_FILE="$STATE_DIR/artist_history.txt"
 TRACK_HISTORY_FILE="$STATE_DIR/track_history.txt"
 REPLAYGAIN_STATE_FILE="$STATE_DIR/replaygain_state.txt"
 CROSSFADE_STATE_FILE="$STATE_DIR/crossfade_state.txt"
+MIXED_BOUNDARY_FILE="$STATE_DIR/mixed_boundary.txt"
 LAST_POSITION_FILE="$STATE_DIR/last_position.txt"
 DEBUG_LOG="$STATE_DIR/autodj.debug.log"
 
@@ -408,9 +409,27 @@ if (( position == 0 )) && [[ "$last_position" != "0" ]] && { [[ -s "$ARTIST_HIST
   : > "$TRACK_HISTORY_FILE"
   replaygain_reset_tracking
   crossfade_reset_tracking
+  rm -f "$MIXED_BOUNDARY_FILE" 2>/dev/null || true
 fi
 
 printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
+
+# AutoDJ appends to the END of the queue, but up to QUEUE_LOW_THRESHOLD
+# tracks from the original, deliberately curated queue can still be ahead
+# of the current position when it does - those should keep playing under
+# your own normal settings, not the "mixed session" ones, even though
+# AutoDJ has already added something after them. So replaygain/crossfade
+# only turn on once playback actually REACHES the first AutoDJ-added
+# track (MIXED_BOUNDARY_FILE, set below when that track is appended) -
+# checked every tick, not just on the tick that adds it, since playback
+# advances between runs regardless of whether anything new gets added.
+if [[ -f "$MIXED_BOUNDARY_FILE" ]]; then
+  mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)"
+  if [[ -n "$mixed_boundary" ]] && (( position >= mixed_boundary )); then
+    replaygain_sync "track"
+    crossfade_sync "$AUTO_CROSSFADE"
+  fi
+fi
 
 if (( remaining >= QUEUE_LOW_THRESHOLD )); then
   log "Enough tracks remaining - nothing to do"
@@ -833,5 +852,14 @@ add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/jso
 log "Added '$picked_file' (artist: $chosen_artist) to the queue - response: $add_response"
 history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$(normalize "$chosen_artist")"
 history_add "$TRACK_HISTORY_FILE" "$TRACK_HISTORY_SIZE" "$picked_file"
-replaygain_sync "track"
-crossfade_sync "$AUTO_CROSSFADE"
+
+# Marks where AutoDJ-mixed content starts (see the boundary check in step
+# 1 above) - only on the FIRST addition since the last fresh-queue reset,
+# so the boundary always points at the earliest mixed track rather than
+# creeping forward with every subsequent addition. $queue_len is the
+# queue's length BEFORE this addition, i.e. exactly the index this new
+# track now occupies.
+if [[ ! -f "$MIXED_BOUNDARY_FILE" ]]; then
+  printf '%s' "$queue_len" > "$MIXED_BOUNDARY_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist mixed-content boundary"
+  log "Marking queue position $queue_len as the start of AutoDJ-mixed content"
+fi

@@ -210,8 +210,13 @@ volume normalization on for AutoDJ-extended listening even if you normally
 leave it off. Set `AUTO_REPLAYGAIN=on` to have the script manage this for
 you automatically:
 
-- Switches MPD's replay gain mode to `track` the first time AutoDJ actually
-  adds a track to the queue (i.e. once it's genuinely "mixed").
+- Switches MPD's replay gain mode to `track` once playback actually
+  *reaches* the first AutoDJ-added track - not merely once AutoDJ appends
+  it. AutoDJ adds a track as soon as only `QUEUE_LOW_THRESHOLD` tracks are
+  left, which can still be several tracks away (e.g. the tail end of an
+  album you queued yourself) before the newly-mixed content is actually
+  reached; switching immediately on add would otherwise apply this to that
+  still-playing original content too.
 - Switches it back to `off` at the next freshly-started queue (the same
   `position == 0` signal that resets the repeat guard, see above) - back
   to your own normal setting for deliberately curated listening.
@@ -253,8 +258,9 @@ other during a mixed AutoDJ session even if you normally play albums
 without any overlap. Set `AUTO_CROSSFADE=<seconds>` (e.g. `AUTO_CROSSFADE=5`)
 to have the script manage this for you automatically:
 
-- Switches MPD's crossfade to that many seconds the first time AutoDJ
-  actually adds a track to the queue (i.e. once it's genuinely "mixed").
+- Switches MPD's crossfade to that many seconds once playback actually
+  *reaches* the first AutoDJ-added track - same "reaches, not merely
+  appends" timing as volume normalization above, for the same reason.
 - Switches it back to `0` at the next freshly-started queue - back to no
   crossfade for deliberately curated listening.
 - Never touches it on every single tick, and never overrides a manual
