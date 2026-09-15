@@ -318,8 +318,12 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now volumio-autodj-watch.service
+sudo systemctl enable volumio-autodj-watch.service
+sudo systemctl start volumio-autodj-watch.service
 ```
+
+(Split into two commands rather than `enable --now` - that flag needs
+systemd 220+, not a safe assumption on an older device.)
 
 (For `volumio-autodj-local.sh` running directly on Volumio via SSH, same
 idea - just point `ExecStart` at that script instead, still with
