@@ -659,7 +659,60 @@ find_local_artist() {
   return 1
 }
 
+# ---------------------------------------------------------------------------
+# Tidal fallback (automatic - no separate on/off switch): for a candidate
+# NOT found in the local library, also search Tidal via Volumio's own
+# /api/v1/search - confirmed on a real device to already return
+# fully-formed track items (uri, title, artist, album, service, type) for
+# anything Tidal has, so there's no need to hand-build a "tidal://..." uri
+# the way the local lookup needs a URI_PREFIXES mapping. Naturally a no-op
+# wherever Tidal isn't set up as a Volumio source: the search response then
+# simply carries no "service": "tidal" items at all, so no separate "is
+# Tidal available" check is needed either - it falls out of the same
+# result set. Filters by the "service"/"type" fields rather than any
+# list's title text (e.g. a German "TIDAL Titel") to stay independent of
+# Volumio's own UI language setting.
+#
+# Only ever tried AFTER a local match already failed (see the candidate
+# loops below) - never changes which candidate wins when both are
+# available, only widens what counts as "found" for one that isn't local.
+#
+# Populates the SAME files/titles/albums arrays step 5 below already uses
+# for local matches - the caller must reset them first (same convention as
+# collect_files_by_artist()). Post-filters to an exact (normalized) artist
+# match, same reasoning as the local "search" fallback needing one:
+# Volumio's own search is fuzzy/substring, not exact. Also records the
+# artist name exactly as Tidal has it tagged (tidal_matched_artist_name),
+# mirroring find_local_artist() returning the locally-tagged canonical
+# name rather than the raw Last.fm candidate string. Purely a curl+jq call
+# against Volumio's REST API - no "mpc"/"nc" dependency, so it works
+# identically here as in the local (SSH) variant of this script.
+# ---------------------------------------------------------------------------
+tidal_find_track() {
+  local target_artist="$1" target_norm search_json uri title album artist_field
+
+  target_norm="$(normalize "$target_artist")"
+  tidal_matched_artist_name=""
+
+  search_json="$(curl -sf --max-time 10 "${api_base}/search?query=$(urlencode "$target_artist")")" || return 1
+
+  while IFS=$'\x1f' read -r uri title album artist_field; do
+    [[ -z "$uri" ]] && continue
+    [[ "$(normalize "$artist_field")" == "$target_norm" ]] || continue
+    files+=("$uri")
+    titles+=("$title")
+    albums+=("$album")
+    [[ -z "$tidal_matched_artist_name" ]] && tidal_matched_artist_name="$artist_field"
+  done < <(printf '%s' "$search_json" | jq -r '
+      .navigation.lists[]?.items[]? | select(.service == "tidal" and .type == "song") |
+      [.uri, .title, (.album // ""), (.artist // "")] | join("\u001f")
+    ' 2>>"$DEBUG_LOG")
+
+  (( ${#files[@]} > 0 ))
+}
+
 chosen_artist=""
+chosen_source="local"
 for cand in "${candidates[@]}"; do
   [[ -z "$cand" ]] && continue
   norm_cand="$(normalize "$cand")"
@@ -669,7 +722,15 @@ for cand in "${candidates[@]}"; do
   fi
   if real_match="$(find_local_artist "$norm_cand")"; then
     chosen_artist="$real_match"
+    chosen_source="local"
     log "Match found in local library: '$cand' -> '$chosen_artist'"
+    break
+  fi
+  files=(); titles=(); albums=()
+  if tidal_find_track "$cand"; then
+    chosen_artist="$tidal_matched_artist_name"
+    chosen_source="tidal"
+    log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
     break
   fi
 done
@@ -724,7 +785,15 @@ try_alternate_seed() {
     fi
     if real_match="$(find_local_artist "$norm_cand")"; then
       chosen_artist="$real_match"
+      chosen_source="local"
       log "Retry with alternate seed '$seed': match found in local library: '$cand' -> '$chosen_artist'"
+      return 0
+    fi
+    files=(); titles=(); albums=()
+    if tidal_find_track "$cand"; then
+      chosen_artist="$tidal_matched_artist_name"
+      chosen_source="tidal"
+      log "Retry with alternate seed '$seed': not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
       return 0
     fi
   done
@@ -776,6 +845,13 @@ fi
 # two of them instead of ever moving on. A repeated artist (picked at
 # random from among their local tracks each time, same as any other pick
 # - see below) is still preferable to playback simply stopping.
+#
+# Deliberately LOCAL-only, unlike the two loops above - by this point every
+# candidate has already had its chance at both a local AND a Tidal match
+# (and lost to the repeat guard either way), so this is specifically about
+# reusing a previously-successful LOCAL pick rather than widening the
+# search further; keeps this already-dense fallback path from growing a
+# second, Tidal-flavored copy of itself for comparatively little benefit.
 if [[ -z "$chosen_artist" ]]; then
   fallback_artist=""
   fallback_cand_name=""
@@ -798,6 +874,7 @@ if [[ -z "$chosen_artist" ]]; then
   done
   if [[ -n "$fallback_artist" ]]; then
     chosen_artist="$fallback_artist"
+    chosen_source="local"
     log "No fresh match for '$seed_artist' - falling back to least-recently-used '$fallback_cand_name' -> '$chosen_artist' rather than leaving the queue to run dry"
   fi
 fi
@@ -825,62 +902,66 @@ fi
 # Talking to MPD's line protocol directly via "nc" sidesteps mpc/
 # libmpdclient (and its negotiation) entirely, so it works regardless of
 # how old Volumio's bundled MPD is.
-norm_chosen="$(normalize "$chosen_artist")"
+if [[ "$chosen_source" == "local" ]]; then
+  norm_chosen="$(normalize "$chosen_artist")"
 
-# Parses a find/search response (repeated "file: ..." blocks, each with
-# assorted "Tag: value" lines) and appends the path/title/album of every
-# block whose Artist line normalizes to exactly the target artist, in
-# lockstep (same index across files/titles/albums). The post-filter
-# matters for "search" (substring match) - without it, an unrelated
-# artist whose name merely contains this one as a substring would also
-# match; it's a harmless no-op for "find" (exact match). Title/album are
-# picked up here (instead of a second query later) so the eventual
-# addToQueue call can send real metadata instead of just a bare uri.
-collect_files_by_artist() {
-  local verb="$1" cur_file="" cur_artist="" cur_title="" cur_album="" line
+  # Parses a find/search response (repeated "file: ..." blocks, each with
+  # assorted "Tag: value" lines) and appends the path/title/album of every
+  # block whose Artist line normalizes to exactly the target artist, in
+  # lockstep (same index across files/titles/albums). The post-filter
+  # matters for "search" (substring match) - without it, an unrelated
+  # artist whose name merely contains this one as a substring would also
+  # match; it's a harmless no-op for "find" (exact match). Title/album are
+  # picked up here (instead of a second query later) so the eventual
+  # addToQueue call can send real metadata instead of just a bare uri.
+  collect_files_by_artist() {
+    local verb="$1" cur_file="" cur_artist="" cur_title="" cur_album="" line
 
-  flush_current() {
-    if [[ -n "$cur_file" && "$(normalize "$cur_artist")" == "$norm_chosen" ]]; then
-      files+=("$cur_file")
-      titles+=("$cur_title")
-      albums+=("$cur_album")
-    fi
+    flush_current() {
+      if [[ -n "$cur_file" && "$(normalize "$cur_artist")" == "$norm_chosen" ]]; then
+        files+=("$cur_file")
+        titles+=("$cur_title")
+        albums+=("$cur_album")
+      fi
+    }
+
+    while IFS= read -r line; do
+      case "$line" in
+        "file: "*)
+          flush_current
+          cur_file="${line#file: }"
+          cur_artist=""
+          cur_title=""
+          cur_album=""
+          ;;
+        "Artist: "*) cur_artist="${line#Artist: }" ;;
+        "Title: "*)  cur_title="${line#Title: }" ;;
+        "Album: "*)  cur_album="${line#Album: }" ;;
+        "ACK "*)
+          log "MPD returned an error for '$verb artist \"$chosen_artist\"': $line"
+          ;;
+      esac
+    done < <(mpd_raw_query "$verb artist $(mpd_quote "$chosen_artist")")
+    flush_current
   }
 
-  while IFS= read -r line; do
-    case "$line" in
-      "file: "*)
-        flush_current
-        cur_file="${line#file: }"
-        cur_artist=""
-        cur_title=""
-        cur_album=""
-        ;;
-      "Artist: "*) cur_artist="${line#Artist: }" ;;
-      "Title: "*)  cur_title="${line#Title: }" ;;
-      "Album: "*)  cur_album="${line#Album: }" ;;
-      "ACK "*)
-        log "MPD returned an error for '$verb artist \"$chosen_artist\"': $line"
-        ;;
-    esac
-  done < <(mpd_raw_query "$verb artist $(mpd_quote "$chosen_artist")")
-  flush_current
-}
+  files=()
+  titles=()
+  albums=()
+  collect_files_by_artist find
 
-files=()
-titles=()
-albums=()
-collect_files_by_artist find
+  if (( ${#files[@]} == 0 )); then
+    log "MPD 'find artist \"$chosen_artist\"' returned nothing despite appearing in 'mpc list artist' - retrying with 'search' instead"
+    collect_files_by_artist search
+  fi
 
-if (( ${#files[@]} == 0 )); then
-  log "MPD 'find artist \"$chosen_artist\"' returned nothing despite appearing in 'mpc list artist' - retrying with 'search' instead"
-  collect_files_by_artist search
+  if (( ${#files[@]} == 0 )); then
+    log "No files found for '$chosen_artist' via 'find' or 'search' - skipping (check $DEBUG_LOG for MPD errors, or try manually: printf 'find artist \"%s\"\\nclose\\n' | nc $MPD_HOST $MPD_PORT)"
+    exit 0
+  fi
 fi
-
-if (( ${#files[@]} == 0 )); then
-  log "No files found for '$chosen_artist' via 'find' or 'search' - skipping (check $DEBUG_LOG for MPD errors, or try manually: printf 'find artist \"%s\"\\nclose\\n' | nc $MPD_HOST $MPD_PORT)"
-  exit 0
-fi
+# else: chosen_source == "tidal" - files/titles/albums were already
+# populated by tidal_find_track() back in step 4/4b, nothing to do here.
 
 # Prefer a track that isn't in the recent track history, so the exact
 # same song doesn't repeat within the last TRACK_HISTORY_SIZE additions -
@@ -913,23 +994,36 @@ if [[ -z "$picked_title" ]]; then
   picked_title="${picked_file##*/}"
 fi
 
-# Volumio's addToQueue wants a "trackType" (the file format, e.g. "flac"),
-# derived here from the file extension rather than queried separately.
-picked_track_type="$(printf '%s' "${picked_file##*.}" | tr '[:upper:]' '[:lower:]')"
+if [[ "$chosen_source" == "tidal" ]]; then
+  # tidal_find_track() already stored the complete, ready-to-use
+  # "tidal://..." uri as the "file" identity - no prefix mapping needed
+  # (unlike the local library, Tidal's own uri scheme is self-contained).
+  # Volumio's own Tidal search results all carry "trackType": "tidal" -
+  # hardcoded here to match rather than derived from a file extension that
+  # doesn't exist for a streamed track.
+  uri="$picked_file"
+  picked_track_type="tidal"
+  add_service="tidal"
+else
+  # Volumio's addToQueue wants a "trackType" (the file format, e.g. "flac"),
+  # derived here from the file extension rather than queried separately.
+  picked_track_type="$(printf '%s' "${picked_file##*.}" | tr '[:upper:]' '[:lower:]')"
 
-uri=""
-label="${picked_file%%/*}"
-while IFS='|' read -r lbl pfx; do
-  [[ -z "$lbl" ]] && continue
-  if [[ "$lbl" == "$label" ]]; then
-    uri="${pfx}${picked_file}"
-    break
+  uri=""
+  label="${picked_file%%/*}"
+  while IFS='|' read -r lbl pfx; do
+    [[ -z "$lbl" ]] && continue
+    if [[ "$lbl" == "$label" ]]; then
+      uri="${pfx}${picked_file}"
+      break
+    fi
+  done <<< "$URI_PREFIXES_RAW"
+
+  if [[ -z "$uri" ]]; then
+    log "No configured uri prefix for source label '$label' (path: $picked_file) - set AUTODJ_URI_PREFIXES; skipping"
+    exit 0
   fi
-done <<< "$URI_PREFIXES_RAW"
-
-if [[ -z "$uri" ]]; then
-  log "No configured uri prefix for source label '$label' (path: $picked_file) - set AUTODJ_URI_PREFIXES; skipping"
-  exit 0
+  add_service="mpd"
 fi
 
 # ---------------------------------------------------------------------------
@@ -946,7 +1040,8 @@ add_payload="$(jq -n \
   --arg artist "$chosen_artist" \
   --arg album "$picked_album" \
   --arg trackType "$picked_track_type" \
-  '{uri: $uri, service: "mpd", title: $title, artist: $artist, album: $album, type: "song", trackType: $trackType}')"
+  --arg service "$add_service" \
+  '{uri: $uri, service: $service, title: $title, artist: $artist, album: $album, type: "song", trackType: $trackType}')"
 
 add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/json' -d "$add_payload" "${api_base}/addToQueue")" || {
   log "addToQueue POST request failed for uri '$uri'"

@@ -62,7 +62,8 @@ Each run does at most one check and, if needed, adds exactly one track:
    (checked via `mpc list artist`) - and skips any candidate that was used
    too recently (**artist repeat guard**: a small history file of the last
    `ARTIST_HISTORY_SIZE` artists, so the same artist isn't picked again
-   right away).
+   right away). If a candidate isn't in the local library, also checks
+   Tidal before moving on to the next one - see "Tidal fallback" below.
 4. Picks one random track by the matched artist, preferring one that isn't
    in the **track repeat guard** (the last `TRACK_HISTORY_SIZE` tracks
    actually added - a separate, normally larger history than the artist
@@ -74,6 +75,29 @@ This is deliberately simple/reactive (one track at a time, re-evaluated on
 every run) rather than planning several tracks ahead - it naturally
 "drifts" the similarity chain over time and needs no extra state beyond
 the small repeat-guard history.
+
+### Tidal fallback
+
+Automatic, no separate on/off switch: whenever a Last.fm candidate isn't in
+your local library, the script also searches Tidal (via Volumio's own
+`/api/v1/search` - the same one behind Volumio's UI search box) before
+giving up on that candidate and moving on to the next. Local matches always
+win when both exist - Tidal is only ever tried after the local lookup for
+that *same* candidate has already failed, so this only widens what counts
+as "found," it never changes which candidate is picked when your library
+already has it.
+
+Naturally a no-op if you don't have Tidal set up as a Volumio source: the
+search response then simply carries no Tidal results at all, so there's
+nothing to detect or configure - it just never matches anything there.
+Picked tracks go through the exact same repeat guards as local ones
+(`ARTIST_HISTORY_SIZE`/`TRACK_HISTORY_SIZE`), keyed by their `tidal://...`
+uri.
+
+Not extended to the final least-recently-used fallback step (the one that
+kicks in only once every candidate has already failed both local and
+Tidal lookups, plus every retry) - that step is specifically about reusing
+a previously-successful *local* pick rather than searching further.
 
 ### Setup
 
