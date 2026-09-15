@@ -286,13 +286,20 @@ volume mid-song instead of a clean change at the track boundary.
 
 If you have `AUTO_REPLAYGAIN` or `AUTO_CROSSFADE` on, run the script's
 lightweight `--watch-boundary` mode alongside the main one to fix this. It
-does nothing else - no Last.fm calls, no library scans, not even `curl`/
-`jq`/`mpc` unless `AUTO_REPLAYGAIN` needs `mpc` - just a small raw-protocol
-`status` query to MPD every few seconds (`AUTODJ_WATCH_INTERVAL`, default
-`5`) to check whether playback has reached the boundary yet, so the switch
-lands within a few seconds of the actual track change instead of up to a
-full main-tick interval later. Negligible overhead: on an idle tick it's a
-single tiny network round trip, no subprocess beyond that.
+does nothing else - no Last.fm calls, no library scans - just Volumio's own
+REST `getstate` (the same call the main tick uses for its own position
+check) every few seconds (`AUTODJ_WATCH_INTERVAL`, default `5`) to check
+whether playback has reached the boundary yet, so the switch lands within a
+few seconds of the actual track change instead of up to a full main-tick
+interval later. Deliberately goes through Volumio's own API rather than
+querying MPD directly for this: MPD's own queue position is NOT reliable
+here whenever MPD runs in "consume" mode (confirmed on a real device -
+MPD's own raw `status` reported a static, single-track `playlistlength: 1`
+throughout, completely decoupled from Volumio's actual queue position,
+since Volumio feeds MPD one track at a time in that mode rather than
+loading the whole queue into MPD's own playlist). Still negligible
+overhead: one small `curl`+`jq` round trip per tick, far cheaper than the
+full queue-refill logic.
 
 Needs to run continuously, so it's a systemd **service**, not a timer:
 

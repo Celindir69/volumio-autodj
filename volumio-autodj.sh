@@ -32,6 +32,7 @@ export LANG=C
 # ---------------------------------------------------------------------------
 VOLUMIO_HOST="${VOLUMIO_HOST:?Set VOLUMIO_HOST to the Volumio devices IP/hostname}"
 VOLUMIO_PORT="${VOLUMIO_PORT:-3000}"
+api_base="http://${VOLUMIO_HOST}:${VOLUMIO_PORT}/api/v1"
 
 # MPD is queried directly (not through Volumio's REST API, which has no
 # "does this artist exist locally / list their tracks" endpoint) to check
@@ -148,16 +149,16 @@ log() {
   printf '[%s] %s\n' "$(date '+%F %T')" "$*" | tee -a "$DEBUG_LOG" >&2
 }
 
-# In "--watch-boundary" mode the script only ever talks to MPD directly via
-# mpd_raw_query() ("nc" below) - none of curl/jq/mpc (needed by the full
-# queue-refill logic) are required just to run that mode, so don't demand
-# them on a device set up only to run the watcher. Plain space-separated
-# string, not a bash array, iterated below - "${arr[@]}" on an EMPTY array
-# raises "unbound variable" under "set -u" on bash older than 4.4 (fixed
-# there, but not a safe assumption across every device this might run on;
-# same reasoning as this script avoiding "declare -A"/"mapfile" elsewhere).
+# In "--watch-boundary" mode the script polls Volumio's REST API (curl/jq)
+# for the queue position, plus MPD directly via mpd_raw_query() ("nc") for
+# crossfade - "mpc" (needed only by the full queue-refill logic) is the one
+# tool NOT required just to run that mode. Plain space-separated string, not
+# a bash array, iterated below - "${arr[@]}" on an EMPTY array raises
+# "unbound variable" under "set -u" on bash older than 4.4 (fixed there, but
+# not a safe assumption across every device this might run on; same
+# reasoning as this script avoiding "declare -A"/"mapfile" elsewhere).
 if (( WATCH_BOUNDARY_ONLY )); then
-  required_tools="nc"
+  required_tools="curl jq nc"
 else
   required_tools="curl jq mpc nc"
 fi
@@ -378,11 +379,16 @@ crossfade_reset_tracking() {
 
 # ---------------------------------------------------------------------------
 # "--watch-boundary" mode: see the header comment near WATCH_BOUNDARY_ONLY
-# above. Polls MPD's own "status" reply directly (its "song:" field is MPD's
-# own current queue position - the same index Volumio's queue is built on
-# top of) rather than going through Volumio's REST API, to keep each poll as
-# cheap as possible: no curl/jq subprocess, just one small raw-protocol
-# round trip - this runs far more often than the main queue-refill tick.
+# above. Polls Volumio's own REST getstate, exactly like the main queue
+# check below, rather than MPD's raw "status" reply - confirmed on a real
+# device that MPD's own "song:"/"playlistlength:" fields do NOT track
+# Volumio's queue position at all when MPD is running in consume mode
+# (playlistlength stayed "1" throughout, since Volumio feeds MPD one track
+# at a time rather than loading the whole queue into MPD's own playlist);
+# only Volumio's REST API actually reflects the queue position this
+# script's boundary bookkeeping is based on. Costs one small curl+jq round
+# trip per tick - more than a bare MPD query, but still far cheaper than
+# the full queue-refill logic (no Last.fm calls, no mpc library scans).
 # ---------------------------------------------------------------------------
 WATCH_INTERVAL="${AUTODJ_WATCH_INTERVAL:-5}"
 
@@ -390,12 +396,12 @@ boundary_watch_tick() {
   [[ "$AUTO_REPLAYGAIN" == "on" || "$AUTO_CROSSFADE" != "off" ]] || return 0
   [[ -f "$MIXED_BOUNDARY_FILE" ]] || return 0
 
-  local mixed_boundary status_reply current_position
+  local mixed_boundary watch_state_json current_position
   mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
   [[ -n "$mixed_boundary" ]] || return 0
 
-  status_reply="$(mpd_raw_query "status")" || return 0
-  current_position="$(printf '%s' "$status_reply" | sed -n 's/^song: //p')"
+  watch_state_json="$(curl -sf --max-time 5 "${api_base}/getstate")" || return 0
+  current_position="$(jq_safe '.position // empty' '' "$watch_state_json")"
   [[ -n "$current_position" ]] || return 0
 
   if (( current_position >= mixed_boundary )); then
@@ -420,8 +426,6 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Check Volumio's current playback state and queue.
 # ---------------------------------------------------------------------------
-api_base="http://${VOLUMIO_HOST}:${VOLUMIO_PORT}/api/v1"
-
 state_json="$(curl -sf --max-time 10 "${api_base}/getstate")" || {
   log "Could not reach Volumio's REST API at $api_base (getstate) - is VOLUMIO_HOST/VOLUMIO_PORT correct?"
   exit 1
