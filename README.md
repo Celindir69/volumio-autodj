@@ -48,8 +48,14 @@ Talks to Volumio over the network:
 Each run does at most one check and, if needed, adds exactly one track:
 
 1. Reads Volumio's current state and queue. Does nothing if playback isn't
-   currently `play`, or if the number of tracks left after the current one
-   is still at or above `QUEUE_LOW_THRESHOLD`.
+   currently `play`, if **Repeat All or Repeat Single is enabled** (the
+   whole point of repeat is to loop the current queue unchanged - AutoDJ
+   pausing entirely while it's on, checked on every run, avoids both
+   growing a queue you specifically wanted to loop AND misreading the
+   position wrapping back to `0` at the end of every lap as a brand new
+   session, which would otherwise wipe the repeat-guard history and reset
+   replay gain/crossfade on every single loop), or if the number of tracks
+   left after the current one is still at or above `QUEUE_LOW_THRESHOLD`.
 2. Otherwise, picks a seed artist via a **weighted random pick among the
    last `SEED_WINDOW_SIZE` queue entries** (most recent weighted highest -
    e.g. with the default of 5, the newest contributes 5x as many "tickets"

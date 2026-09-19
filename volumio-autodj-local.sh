@@ -421,6 +421,19 @@ boundary_watch_tick() {
 
   local watch_state_json current_position
   watch_state_json="$(curl -sf --max-time 5 "${api_base}/getstate")" || return 0
+
+  # Same "Repeat All"/"Repeat Single" pause as the main tick (see the
+  # comment there): with repeat on, position legitimately wraps back to 0
+  # at the end of every lap, which would otherwise look exactly like a
+  # fresh session to the edge-triggered detection just below and
+  # incorrectly clear the boundary / reset replay gain+crossfade on every
+  # single loop. Reuses the getstate response already fetched above - no
+  # extra request.
+  if [[ "$(jq_safe '.repeat // false' 'false' "$watch_state_json")" == "true" ]] ||
+     [[ "$(jq_safe '.repeatSingle // false' 'false' "$watch_state_json")" == "true" ]]; then
+    return 0
+  fi
+
   current_position="$(jq_safe '.position // empty' '' "$watch_state_json")"
   [[ -n "$current_position" ]] || return 0
 
@@ -493,6 +506,22 @@ fi
 track_type="$(jq_safe '.trackType // empty' '' "$state_json")"
 if [[ "$track_type" == "webradio" ]]; then
   log "Currently playing a web radio stream (trackType=webradio) - nothing to do"
+  exit 0
+fi
+
+# "Repeat All" (or "Repeat Single") means the user wants THIS queue to loop
+# unchanged, not grow - stop here, before ever touching the queue, the
+# repeat-guard history, or replay gain/crossfade. Deliberately checked
+# BEFORE the fresh-queue detection below: with repeat on, Volumio's own
+# position legitimately wraps back to 0 at the end of every lap, which
+# would otherwise look exactly like a brand new session starting and wipe
+# out the repeat-guard history (and reset replay gain/crossfade) on every
+# single loop - confirmed live (getstate) that Volumio exposes this as two
+# separate booleans, "repeat" (all) and "repeatSingle".
+repeat_all="$(jq_safe '.repeat // false' 'false' "$state_json")"
+repeat_single="$(jq_safe '.repeatSingle // false' 'false' "$state_json")"
+if [[ "$repeat_all" == "true" || "$repeat_single" == "true" ]]; then
+  log "Repeat is enabled in Volumio (repeat=$repeat_all, repeatSingle=$repeat_single) - AutoDJ pauses entirely while it's on"
   exit 0
 fi
 
