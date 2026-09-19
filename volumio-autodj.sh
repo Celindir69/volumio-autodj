@@ -498,7 +498,7 @@ fi
 repeat_all="$(jq_safe '.repeat // false' 'false' "$state_json")"
 repeat_single="$(jq_safe '.repeatSingle // false' 'false' "$state_json")"
 if [[ "$repeat_all" == "true" || "$repeat_single" == "true" ]]; then
-  log "Repeat is enabled in Volumio (repeat=$repeat_all, repeatSingle=$repeat_single) - AutoDJ pauses entirely while it's on"
+  log "Repeat is enabled in Volumio (repeat=$repeat_all, repeatSingle=$repeat_single) - nothing to do"
   exit 0
 fi
 
