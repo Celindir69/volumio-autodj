@@ -6,6 +6,8 @@ playing (via the [Last.fm](https://www.last.fm/api/account/create) API),
 matched against your local library, and appends it - so playback never
 just stops.
 
+Developed using AI (Claude code https://claude.ai)
+
 Two scripts, for different setups:
 
 - **`volumio-autodj.sh`** - runs on a **different device** than Volumio (a
