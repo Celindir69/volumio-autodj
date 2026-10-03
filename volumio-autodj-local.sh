@@ -86,6 +86,25 @@ CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 ARTIST_HISTORY_SIZE="${ARTIST_HISTORY_SIZE:-4}"
 TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
 
+# Optional keyword blocklist: semicolon-separated list of words/phrases
+# (e.g. "Live;Tubular Bells;Ommadawn") - any candidate track whose title
+# OR album contains one of these, case-insensitively, is skipped entirely
+# (never added, regardless of either repeat guard). Handy for keeping live
+# recordings or specific long-form albums out of the mix. Plain substring
+# match, not a regex - "Live" also matches e.g. an album called "Olive
+# Grove"; a real per-field filter (artist/album/genre/year/...) like
+# volumio-smart-playlists.sh's rule file is out of scope here. Empty
+# (default) disables the filter entirely.
+EXCLUDE_KEYWORDS="${EXCLUDE_KEYWORDS:-}"
+
+exclude_keywords=()
+IFS=';' read -ra _exclude_keywords_raw <<< "$EXCLUDE_KEYWORDS"
+for _kw in "${_exclude_keywords_raw[@]}"; do
+  _kw="$(printf '%s' "$_kw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  [[ -n "$_kw" ]] && exclude_keywords+=("$_kw")
+done
+unset _exclude_keywords_raw _kw
+
 # How many of the most recent queue entries to consider as a seed pool -
 # see step 2 below. 1 reproduces the old "always the last track" behavior.
 SEED_WINDOW_SIZE="${SEED_WINDOW_SIZE:-5}"
@@ -194,6 +213,27 @@ normalize() {
     | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g' \
     | tr '[:upper:]' '[:lower:]' \
     | tr -d ' _.-'
+}
+
+# Case-insensitive substring check against EXCLUDE_KEYWORDS (see the
+# config section above) - deliberately NOT using normalize() here, which
+# strips spaces/punctuation entirely and would turn a phrase like "Tubular
+# Bells" into "tubularbells", still matching correctly but needlessly
+# fragile for a plain substring comparison; a simple lowercase (keeping
+# spaces) is all that's needed. Returns success (0) if title OR album
+# contains any configured keyword.
+track_excluded() {
+  local title_lc album_lc kw kw_lc
+  (( ${#exclude_keywords[@]} == 0 )) && return 1
+  title_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  album_lc="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  for kw in "${exclude_keywords[@]}"; do
+    kw_lc="$(printf '%s' "$kw" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$title_lc" == *"$kw_lc"* || "$album_lc" == *"$kw_lc"* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
 urlencode() {
@@ -975,6 +1015,37 @@ if [[ "$chosen_source" == "local" ]]; then
 fi
 # else: chosen_source == "tidal" - files/titles/albums were already
 # populated by tidal_find_track() back in step 4/4b, nothing to do here.
+
+# Drop anything matching EXCLUDE_KEYWORDS before the track-history step
+# below - an excluded track must never be picked, no matter how long ago
+# it was last played. Built via a temporary kept_* array rather than
+# filtering files/titles/albums in place, since "${arr[@]}" on an array
+# that ends up empty raises "unbound variable" under "set -u" on bash
+# older than 4.4 (same reasoning as eligible_indices below) - the length
+# check before the final assignment avoids ever expanding one.
+if (( ${#exclude_keywords[@]} > 0 )); then
+  kept_files=()
+  kept_titles=()
+  kept_albums=()
+  for (( i = 0; i < ${#files[@]}; i++ )); do
+    track_excluded "${titles[$i]}" "${albums[$i]}" && continue
+    kept_files+=("${files[$i]}")
+    kept_titles+=("${titles[$i]}")
+    kept_albums+=("${albums[$i]}")
+  done
+  files=()
+  titles=()
+  albums=()
+  if (( ${#kept_files[@]} > 0 )); then
+    files=("${kept_files[@]}")
+    titles=("${kept_titles[@]}")
+    albums=("${kept_albums[@]}")
+  fi
+  if (( ${#files[@]} == 0 )); then
+    log "Every candidate track by '$chosen_artist' matched EXCLUDE_KEYWORDS - skipping this run"
+    exit 0
+  fi
+fi
 
 # Prefer a track that isn't in the recent track history, so the exact
 # same song doesn't repeat within the last TRACK_HISTORY_SIZE additions -

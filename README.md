@@ -211,6 +211,14 @@ a previously-successful *local* pick rather than searching further.
   come back too soon even if its artist is fine to reuse sooner. Falls
   back to repeating a track anyway if an artist's whole local catalog was
   used within this window (small library for them).
+- `EXCLUDE_KEYWORDS` (default empty) - semicolon-separated list of words/
+  phrases, e.g. `Live;Tubular Bells;Ommadawn`. Any candidate track whose
+  title OR album contains one of these, case-insensitively, is skipped
+  entirely - handy for keeping live recordings or specific long-form
+  albums out of the mix. Plain substring match, not a regex, so a short
+  word can have false positives (`Live` also matches an album called
+  `Olive Grove`); if every track by the chosen artist gets excluded this
+  way, that run is skipped rather than retrying with a different artist.
 - `MAX_SEED_RETRIES` (default `2`) - if every similar artist for the
   initial seed is blocked by the repeat guard, how many additional random
   seed artists from the queue to retry with before falling back to the
@@ -484,7 +492,8 @@ alongside the console summary.
 
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
-`SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
+`SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`,
+`EXCLUDE_KEYWORDS`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
 `AUTO_CROSSFADE`, `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:
