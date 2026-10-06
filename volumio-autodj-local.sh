@@ -97,6 +97,17 @@ CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 # another retry - once exceeded, candidate search stops early and falls
 # through to the existing LOCAL-only, Last.fm/Tidal-free LRU fallback
 # below, which is fast and always finishes well within budget.
+#
+# Checked only BETWEEN candidates, not DURING one - confirmed live that
+# this alone isn't a tight enough bound: a run can still overshoot this
+# budget by much more than one candidate's worth of time if "curl
+# --max-time 10" doesn't actually cap a single call's wall time as
+# tightly as its name implies on this device (seen in practice: a run
+# whose seed's candidates needed several Tidal lookups took 57s before
+# this deadline fired, not ~25-35s). Every "curl --max-time 10" call in
+# this script is therefore ALSO wrapped in "timeout 12" below - a second,
+# independent, OS-level hard kill that doesn't rely on curl enforcing its
+# own limit correctly.
 SEARCH_DEADLINE_SECONDS="${SEARCH_DEADLINE_SECONDS:-25}"
 search_start_seconds=$SECONDS
 
@@ -219,10 +230,10 @@ log() {
 # "set -u" on bash older than 4.4 (same reasoning as this script avoiding
 # "declare -A"/"mapfile" elsewhere).
 if (( WATCH_BOUNDARY_ONLY )); then
-  required_tools="curl jq"
-  [[ "$AUTO_REPLAYGAIN" == "on" ]] && required_tools="curl jq mpc"
+  required_tools="curl jq timeout"
+  [[ "$AUTO_REPLAYGAIN" == "on" ]] && required_tools="curl jq mpc timeout"
 else
-  required_tools="curl jq mpc"
+  required_tools="curl jq mpc timeout"
 fi
 for tool in $required_tools; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -563,7 +574,7 @@ fi
 # ---------------------------------------------------------------------------
 # 1. Check Volumio's current playback state and queue.
 # ---------------------------------------------------------------------------
-state_json="$(curl -sf --max-time 10 "${api_base}/getstate")" || {
+state_json="$(timeout 12 curl -sf --max-time 10 "${api_base}/getstate")" || {
   log "Could not reach Volumio's REST API at $api_base (getstate)"
   exit 1
 }
@@ -600,7 +611,7 @@ if [[ "$repeat_all" == "true" || "$repeat_single" == "true" ]]; then
   exit 0
 fi
 
-queue_json="$(curl -sf --max-time 10 "${api_base}/getqueue")" || {
+queue_json="$(timeout 12 curl -sf --max-time 10 "${api_base}/getqueue")" || {
   log "Could not reach Volumio's REST API at $api_base (getqueue)"
   exit 1
 }
@@ -722,10 +733,13 @@ history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$norm_seed"
 # 3. Ask Last.fm for similar artists (most similar first).
 # ---------------------------------------------------------------------------
 lastfm_url="http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed_artist")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
-lastfm_json="$(curl -sf --max-time 10 "$lastfm_url")" || {
+_t0=$SECONDS
+lastfm_json="$(timeout 12 curl -sf --max-time 10 "$lastfm_url")" || {
   log "Last.fm request failed"
   exit 1
 }
+_elapsed=$(( SECONDS - _t0 ))
+(( _elapsed >= 3 )) && log "Last.fm getsimilar for '$seed_artist' took ${_elapsed}s"
 
 lastfm_error="$(jq_safe '.message // empty' '' "$lastfm_json")"
 if [[ -n "$lastfm_error" ]]; then
@@ -813,12 +827,32 @@ find_local_artist() {
 # name rather than the raw Last.fm candidate string.
 # ---------------------------------------------------------------------------
 tidal_find_track() {
-  local target_artist="$1" target_norm search_json uri title album artist_field
+  local target_artist="$1" target_norm search_json uri title album artist_field _t0 _elapsed _rc
 
   target_norm="$(normalize "$target_artist")"
   tidal_matched_artist_name=""
 
-  search_json="$(curl -sf --max-time 10 "${api_base}/search?query=$(urlencode "$target_artist")")" || return 1
+  _t0=$SECONDS
+  # NOT "search_json=\"\$(...)\" || return 1" - a failing command
+  # substitution used directly as a plain assignment's value is NOT
+  # exempt from "set -e" (same footgun jq_safe()'s own comment warns
+  # about above), so capturing the real curl/timeout exit code via a
+  # separate "\$?" after an unguarded assignment would kill the whole
+  # script right here instead of just this one candidate. The if/else
+  # keeps the assignment's own failure exempt (same exemption an
+  # if-condition already gets elsewhere in this script).
+  if search_json="$(timeout 12 curl -sf --max-time 10 "${api_base}/search?query=$(urlencode "$target_artist")")"; then
+    _rc=0
+  else
+    _rc=$?
+  fi
+  _elapsed=$(( SECONDS - _t0 ))
+  # Only logged when slow enough to matter (diagnosing a real device issue
+  # where the OVERALL candidate search sometimes takes far longer than any
+  # single call's own --max-time/timeout would suggest) - silent otherwise
+  # to avoid spamming the debug log on every normal-speed call.
+  (( _elapsed >= 3 )) && log "Tidal lookup for '$target_artist' took ${_elapsed}s (rc=$_rc)"
+  (( _rc != 0 )) && return 1
 
   while IFS=$'\x1f' read -r uri title album artist_field; do
     [[ -z "$uri" ]] && continue
@@ -879,13 +913,16 @@ done
 #     Last.fm call already succeeded, so this is strictly on top of that.
 # ---------------------------------------------------------------------------
 try_alternate_seed() {
-  local seed="$1" url json err line cand norm_cand real_match
+  local seed="$1" url json err line cand norm_cand real_match _t0 _elapsed
 
   url="http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
-  json="$(curl -sf --max-time 10 "$url")" || {
+  _t0=$SECONDS
+  json="$(timeout 12 curl -sf --max-time 10 "$url")" || {
     log "Retry: Last.fm request failed for alternate seed '$seed'"
     return 1
   }
+  _elapsed=$(( SECONDS - _t0 ))
+  (( _elapsed >= 3 )) && log "Retry: Last.fm getsimilar for alternate seed '$seed' took ${_elapsed}s"
 
   err="$(jq_safe '.message // empty' '' "$json")"
   if [[ -n "$err" ]]; then
@@ -1174,7 +1211,7 @@ add_payload="$(jq -n \
   --arg service "$add_service" \
   '{uri: $uri, service: $service, title: $title, artist: $artist, album: $album, type: "song", trackType: $trackType}')"
 
-add_response="$(curl -sf --max-time 10 -X POST -H 'Content-Type: application/json' -d "$add_payload" "${api_base}/addToQueue")" || {
+add_response="$(timeout 12 curl -sf --max-time 10 -X POST -H 'Content-Type: application/json' -d "$add_payload" "${api_base}/addToQueue")" || {
   log "addToQueue POST request failed for uri '$uri'"
   exit 1
 }
