@@ -98,12 +98,22 @@ TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
 EXCLUDE_KEYWORDS="${EXCLUDE_KEYWORDS:-}"
 
 exclude_keywords=()
-IFS=';' read -ra _exclude_keywords_raw <<< "$EXCLUDE_KEYWORDS"
-for _kw in "${_exclude_keywords_raw[@]}"; do
-  _kw="$(printf '%s' "$_kw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-  [[ -n "$_kw" ]] && exclude_keywords+=("$_kw")
-done
-unset _exclude_keywords_raw _kw
+# Guarded by "[[ -n ... ]]" rather than unconditionally running
+# "read -ra"/expanding its result - on this device's bash, "read -ra arr
+# <<< \"\"" (empty input) does NOT populate "arr" with a zero-length
+# array the way it does on a modern bash; "${arr[@]}" then raises
+# "unbound variable" under "set -u" (confirmed live: this crashed the
+# boundary watcher on every single startup once EXCLUDE_KEYWORDS was
+# simply unset, as it always is there - see startWatcher() in the
+# autodj-plugin's index.js, which deliberately never sets this env var).
+if [[ -n "$EXCLUDE_KEYWORDS" ]]; then
+  IFS=';' read -ra _exclude_keywords_raw <<< "$EXCLUDE_KEYWORDS"
+  for _kw in "${_exclude_keywords_raw[@]}"; do
+    _kw="$(printf '%s' "$_kw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    [[ -n "$_kw" ]] && exclude_keywords+=("$_kw")
+  done
+  unset _exclude_keywords_raw _kw
+fi
 
 # How many of the most recent queue entries to consider as a seed pool -
 # see step 2 below. 1 reproduces the old "always the last track" behavior.
