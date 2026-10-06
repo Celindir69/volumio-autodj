@@ -1138,6 +1138,7 @@ if [[ "$chosen_source" == "local" ]]; then
     done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" -f $'%file%\x1f%title%\x1f%album%\x1f%artist%' "$mpc_cmd" artist "$chosen_artist" 2>>"$DEBUG_LOG")
     _elapsed=$(( SECONDS - _t0 ))
     (( _elapsed >= 1 )) && log "mpc $mpc_cmd artist '$chosen_artist' took ${_elapsed}s"
+    return 0
   }
 
   files=()
