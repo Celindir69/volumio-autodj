@@ -759,12 +759,26 @@ fi
 # bash 4.0+, same as mapfile above) - normalized name in local_norm[i]
 # maps to the real, as-tagged name in local_real[i] at the same index.
 local_norm=()
-local_real=()
-for a in "${local_artists[@]}"; do
-  [[ -z "$a" ]] && continue
-  local_norm+=("$(normalize "$a")")
-  local_real+=("$a")
-done
+local_real=("${local_artists[@]}")
+# Normalizing all ${#local_artists[@]} names via ONE pipeline invocation,
+# not by calling normalize() once per artist - confirmed live that the
+# per-artist version (forking a fresh tr/sed/tr/tr pipeline for EACH local
+# artist) took over two minutes and pegged the CPU near 100% the whole
+# time on a ~4400-artist library, from sheer process-creation overhead -
+# not network/Tidal slowness, which is what this had first looked like
+# (SEARCH_DEADLINE_SECONDS was timing out before ever reaching the
+# candidate loop at all). This applies the identical transformation to
+# the whole newline-separated list in a single pass instead - sed/tr
+# operate per-line/per-character, never across lines, so behavior for
+# each individual name is unchanged - just 4 processes total instead of
+# roughly 4 times the artist count.
+while IFS= read -r line; do
+  local_norm+=("$line")
+done < <(printf '%s\n' "${local_artists[@]}" \
+  | tr -d '\r' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g' \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -d ' _.-')
 
 find_local_artist() {
   local target="$1" i

@@ -767,10 +767,13 @@ fi
 #    (via MPD's artist list) and isn't in the repeat-guard history.
 # ---------------------------------------------------------------------------
 local_artists=()
+_t0=$SECONDS
 while IFS= read -r line; do
   [[ -z "$line" ]] && continue
   local_artists+=("$line")
 done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" list artist 2>>"$DEBUG_LOG")
+_elapsed=$(( SECONDS - _t0 ))
+(( _elapsed >= 1 )) && log "mpc list artist took ${_elapsed}s (found ${#local_artists[@]} local artists)"
 
 if (( ${#local_artists[@]} == 0 )); then
   log "Could not read the local artist list from MPD ($MPD_HOST:$MPD_PORT) - is it running?"
@@ -781,12 +784,26 @@ fi
 # local_norm[i] maps to the real, as-tagged name in local_real[i] at the
 # same index.
 local_norm=()
-local_real=()
-for a in "${local_artists[@]}"; do
-  [[ -z "$a" ]] && continue
-  local_norm+=("$(normalize "$a")")
-  local_real+=("$a")
-done
+local_real=("${local_artists[@]}")
+# Normalizing all ${#local_artists[@]} names via ONE pipeline invocation,
+# not by calling normalize() once per artist - confirmed live that the
+# per-artist version (forking a fresh tr/sed/tr/tr pipeline for EACH local
+# artist) took over two minutes and pegged the CPU near 100% the whole
+# time on a ~4400-artist library, from sheer process-creation overhead -
+# not network/Tidal slowness, which is what this had first looked like
+# (SEARCH_DEADLINE_SECONDS was timing out before ever reaching the
+# candidate loop at all). This applies the identical transformation to
+# the whole newline-separated list in a single pass instead - sed/tr
+# operate per-line/per-character, never across lines, so behavior for
+# each individual name is unchanged - just 4 processes total instead of
+# roughly 4 times the artist count.
+while IFS= read -r line; do
+  local_norm+=("$line")
+done < <(printf '%s\n' "${local_artists[@]}" \
+  | tr -d '\r' \
+  | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/[[:space:]]\+/ /g' \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr -d ' _.-')
 
 find_local_artist() {
   local target="$1" i
@@ -1074,7 +1091,8 @@ if [[ "$chosen_source" == "local" ]]; then
   norm_chosen="$(normalize "$chosen_artist")"
 
   collect_files_by_artist() {
-    local mpc_cmd="$1" fpath ftitle falbum fartist
+    local mpc_cmd="$1" fpath ftitle falbum fartist _t0 _elapsed
+    _t0=$SECONDS
     while IFS=$'\x1f' read -r fpath ftitle falbum fartist; do
       [[ -z "$fpath" ]] && continue
       [[ "$(normalize "$fartist")" == "$norm_chosen" ]] || continue
@@ -1082,6 +1100,8 @@ if [[ "$chosen_source" == "local" ]]; then
       titles+=("$ftitle")
       albums+=("$falbum")
     done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" -f $'%file%\x1f%title%\x1f%album%\x1f%artist%' "$mpc_cmd" artist "$chosen_artist" 2>>"$DEBUG_LOG")
+    _elapsed=$(( SECONDS - _t0 ))
+    (( _elapsed >= 1 )) && log "mpc $mpc_cmd artist '$chosen_artist' took ${_elapsed}s"
   }
 
   files=()
