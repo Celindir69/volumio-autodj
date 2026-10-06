@@ -77,6 +77,24 @@ QUEUE_LOW_THRESHOLD="${QUEUE_LOW_THRESHOLD:-3}"
 # tries them in order (most similar first) until one is found locally.
 CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 
+# Hard wall-clock budget (seconds, via bash's own $SECONDS) for the whole
+# candidate search - steps 3/4/4b combined (every Last.fm call, every
+# per-candidate Tidal fallback lookup, across the initial seed AND every
+# retry seed). Confirmed live on a real device: with CANDIDATE_LIMIT=20
+# and a repeat guard that had already exhausted the "easy", quickly-found
+# local matches, enough candidates needed a Tidal lookup (each its own
+# "curl --max-time 10" call) that the WHOLE RUN exceeded the 45s timeout
+# the caller (autodj-plugin's index.js execFile call, or the standalone
+# script's own cron/systemd scheduling) kills it at - the run was
+# terminated mid-flight with no track added and no clean log message.
+# Checked at the top of every candidate-loop iteration (both the initial
+# loop below and the one inside try_alternate_seed()) and before starting
+# another retry - once exceeded, candidate search stops early and falls
+# through to the existing LOCAL-only, Last.fm/Tidal-free LRU fallback
+# below, which is fast and always finishes well within budget.
+SEARCH_DEADLINE_SECONDS="${SEARCH_DEADLINE_SECONDS:-25}"
+search_start_seconds=$SECONDS
+
 # Repeat guard, split in two - see the header comment above.
 ARTIST_HISTORY_SIZE="${ARTIST_HISTORY_SIZE:-4}"
 TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
@@ -198,6 +216,13 @@ for tool in $required_tools; do
     exit 1
   fi
 done
+
+# See SEARCH_DEADLINE_SECONDS above. Plain elapsed-seconds check via
+# bash's own $SECONDS (no external "date" calls needed) - good enough
+# granularity for a budget measured in tens of seconds.
+search_deadline_exceeded() {
+  (( SECONDS - search_start_seconds >= SEARCH_DEADLINE_SECONDS ))
+}
 
 normalize() {
   # NOTE: the "-" must come LAST in the tr -d set below - "tr -d ' -_.'"
@@ -794,6 +819,10 @@ chosen_artist=""
 chosen_source="local"
 for cand in "${candidates[@]}"; do
   [[ -z "$cand" ]] && continue
+  if search_deadline_exceeded; then
+    log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached while trying candidates for '$seed_artist' - stopping early"
+    break
+  fi
   norm_cand="$(normalize "$cand")"
   if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
     log "Skipping '$cand' (recently used, repeat guard)"
@@ -857,6 +886,10 @@ try_alternate_seed() {
 
   for cand in "${candidates[@]}"; do
     [[ -z "$cand" ]] && continue
+    if search_deadline_exceeded; then
+      log "Retry: search deadline (${SEARCH_DEADLINE_SECONDS}s) reached while trying candidates for alternate seed '$seed' - stopping early"
+      return 1
+    fi
     norm_cand="$(normalize "$cand")"
     if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
       log "Retry: skipping '$cand' (recently used, repeat guard)"
@@ -884,6 +917,10 @@ if [[ -z "$chosen_artist" ]]; then
   tried_seeds=("$(normalize "$seed_artist")")
   retries=0
   while (( retries < MAX_SEED_RETRIES )) && [[ -z "$chosen_artist" ]]; do
+    if search_deadline_exceeded; then
+      log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached - not starting another retry seed"
+      break
+    fi
     retry_pool=()
     for a in "${queue_artists[@]}"; do
       [[ -z "$a" ]] && continue
