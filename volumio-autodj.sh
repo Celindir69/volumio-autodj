@@ -718,7 +718,7 @@ lastfm_json="$(timeout 12 curl -sf --max-time 10 "$lastfm_url")" || {
   exit 1
 }
 _elapsed=$(( SECONDS - _t0 ))
-(( _elapsed >= 3 )) && log "Last.fm getsimilar for '$seed_artist' took ${_elapsed}s"
+(( _elapsed >= 1 )) && log "Last.fm getsimilar for '$seed_artist' took ${_elapsed}s"
 
 lastfm_error="$(jq_safe '.message // empty' '' "$lastfm_json")"
 if [[ -n "$lastfm_error" ]]; then
@@ -831,7 +831,7 @@ tidal_find_track() {
   # where the OVERALL candidate search sometimes takes far longer than any
   # single call's own --max-time/timeout would suggest) - silent otherwise
   # to avoid spamming the debug log on every normal-speed call.
-  (( _elapsed >= 3 )) && log "Tidal lookup for '$target_artist' took ${_elapsed}s (rc=$_rc)"
+  (( _elapsed >= 1 )) && log "Tidal lookup for '$target_artist' took ${_elapsed}s (rc=$_rc)"
   (( _rc != 0 )) && return 1
 
   while IFS=$'\x1f' read -r uri title album artist_field; do
@@ -851,10 +851,12 @@ tidal_find_track() {
 
 chosen_artist=""
 chosen_source="local"
+cand_tried=0
 for cand in "${candidates[@]}"; do
   [[ -z "$cand" ]] && continue
+  cand_tried=$(( cand_tried + 1 ))
   if search_deadline_exceeded; then
-    log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached while trying candidates for '$seed_artist' - stopping early"
+    log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached after trying $cand_tried/${#candidates[@]} candidate(s) (actual elapsed: $(( SECONDS - search_start_seconds ))s) for '$seed_artist' - stopping early"
     break
   fi
   norm_cand="$(normalize "$cand")"
@@ -902,7 +904,7 @@ try_alternate_seed() {
     return 1
   }
   _elapsed=$(( SECONDS - _t0 ))
-  (( _elapsed >= 3 )) && log "Retry: Last.fm getsimilar for alternate seed '$seed' took ${_elapsed}s"
+  (( _elapsed >= 1 )) && log "Retry: Last.fm getsimilar for alternate seed '$seed' took ${_elapsed}s"
 
   err="$(jq_safe '.message // empty' '' "$json")"
   if [[ -n "$err" ]]; then
