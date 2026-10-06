@@ -865,14 +865,20 @@ tidal_find_track() {
 
 chosen_artist=""
 chosen_source="local"
-cand_tried=0
+
+# Pass 1: LOCAL ONLY, walking the whole candidate list in Last.fm's own
+# ranked order (most similar first). Deliberately does NOT try Tidal
+# per-candidate as it goes - confirmed live that doing so let an early,
+# Tidal-only candidate (e.g. Last.fm's #1 most-similar pick) win over a
+# candidate ranked lower that WAS in the local library, since the old
+# single-pass loop took the first match of EITHER kind and stopped right
+# there. No deadline check needed here - purely local array lookups
+# against the already-normalized local_norm array, no network calls, so
+# even 20 candidates finish essentially instantly regardless of library
+# size (now that normalize() itself is no longer the bottleneck either -
+# see local_norm/local_real above).
 for cand in "${candidates[@]}"; do
   [[ -z "$cand" ]] && continue
-  cand_tried=$(( cand_tried + 1 ))
-  if search_deadline_exceeded; then
-    log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached after trying $cand_tried/${#candidates[@]} candidate(s) (actual elapsed: $(( SECONDS - search_start_seconds ))s) for '$seed_artist' - stopping early"
-    break
-  fi
   norm_cand="$(normalize "$cand")"
   if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
     log "Skipping '$cand' (recently used, repeat guard)"
@@ -884,14 +890,35 @@ for cand in "${candidates[@]}"; do
     log "Match found in local library: '$cand' -> '$chosen_artist'"
     break
   fi
-  files=(); titles=(); albums=()
-  if tidal_find_track "$cand"; then
-    chosen_artist="$tidal_matched_artist_name"
-    chosen_source="tidal"
-    log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
-    break
-  fi
 done
+
+# Pass 2: only once NONE of the candidates above matched locally - NOW
+# try Tidal, again walking the whole list in ranked order, so the
+# Tidal-widened search still prefers Last.fm's most-similar candidate
+# first among the ones that have no local match at all. Guarded by
+# SEARCH_DEADLINE_SECONDS since this is where the real network cost
+# lives (one curl per candidate).
+if [[ -z "$chosen_artist" ]]; then
+  cand_tried=0
+  for cand in "${candidates[@]}"; do
+    [[ -z "$cand" ]] && continue
+    cand_tried=$(( cand_tried + 1 ))
+    if search_deadline_exceeded; then
+      log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached after trying $cand_tried/${#candidates[@]} candidate(s) on Tidal (actual elapsed: $(( SECONDS - search_start_seconds ))s) for '$seed_artist' - stopping early"
+      break
+    fi
+    norm_cand="$(normalize "$cand")"
+    # Already logged as skipped in pass 1 above - no need to repeat it.
+    history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
+    files=(); titles=(); albums=()
+    if tidal_find_track "$cand"; then
+      chosen_artist="$tidal_matched_artist_name"
+      chosen_source="tidal"
+      log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
+      break
+    fi
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # 4b. Still nothing? Retry with up to MAX_SEED_RETRIES different seed
@@ -937,12 +964,10 @@ try_alternate_seed() {
     return 1
   fi
 
+  # Pass 1: LOCAL ONLY across the whole candidate list - see the identical
+  # reasoning on the main seed's own candidate loop above.
   for cand in "${candidates[@]}"; do
     [[ -z "$cand" ]] && continue
-    if search_deadline_exceeded; then
-      log "Retry: search deadline (${SEARCH_DEADLINE_SECONDS}s) reached while trying candidates for alternate seed '$seed' - stopping early"
-      return 1
-    fi
     norm_cand="$(normalize "$cand")"
     if history_contains "$ARTIST_HISTORY_FILE" "$norm_cand"; then
       log "Retry: skipping '$cand' (recently used, repeat guard)"
@@ -954,6 +979,17 @@ try_alternate_seed() {
       log "Retry with alternate seed '$seed': match found in local library: '$cand' -> '$chosen_artist'"
       return 0
     fi
+  done
+
+  # Pass 2: only once nothing above matched locally - NOW try Tidal.
+  for cand in "${candidates[@]}"; do
+    [[ -z "$cand" ]] && continue
+    if search_deadline_exceeded; then
+      log "Retry: search deadline (${SEARCH_DEADLINE_SECONDS}s) reached while trying candidates for alternate seed '$seed' - stopping early"
+      return 1
+    fi
+    norm_cand="$(normalize "$cand")"
+    history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
     files=(); titles=(); albums=()
     if tidal_find_track "$cand"; then
       chosen_artist="$tidal_matched_artist_name"
