@@ -70,18 +70,25 @@ Each run does at most one check and, if needed, adds exactly one track:
    own ranked order (most similar first), via `mpc list artist` - and
    skips any candidate that was used too recently (**artist repeat
    guard**: a small history file of the last `ARTIST_HISTORY_SIZE`
-   artists, so the same artist isn't picked again right away). Only if
-   none of them are in the local library does it check Tidal, again in
-   ranked order - see "Tidal fallback" below. This way a candidate
-   that's actually in your library always wins, even if a less-similar
-   candidate further down Last.fm's list would otherwise have matched
-   first on Tidal.
-4. Picks one random track by the matched artist, preferring one that isn't
-   in the **track repeat guard** (the last `TRACK_HISTORY_SIZE` tracks
-   actually added - a separate, normally larger history than the artist
-   one, since hearing the same artist again soon is fine but hearing the
-   exact same song again isn't), and appends it to the end of the queue
-   via Volumio's `addToQueue` command.
+   artists, so the same artist isn't picked again right away), or that
+   has no track left outside the **track repeat guard** (see step 4) -
+   moving on to the next candidate exactly as if it hadn't matched at
+   all, rather than committing to an artist whose only track(s) were
+   just played. Only if none of them are in the local library at all
+   does it check Tidal, again in ranked order - see "Tidal fallback"
+   below. This way a candidate that's actually in your library, with a
+   fresh track available, always wins - even if a less-similar candidate
+   further down Last.fm's list would otherwise have matched first on
+   Tidal.
+4. Picks one random track by the matched artist from whichever ones
+   aren't in the **track repeat guard** (the last `TRACK_HISTORY_SIZE`
+   tracks actually added - a separate, normally larger history than the
+   artist one, since hearing the same artist again soon is fine but
+   hearing the exact same song again isn't), and appends it to the end
+   of the queue via Volumio's `addToQueue` command. Step 3 above already
+   guarantees this normally isn't empty; the one exception is the final
+   least-recently-used fallback (see "Notes / limitations"), which can
+   still repeat a track rather than let the queue run dry.
 
 This is deliberately simple/reactive (one track at a time, re-evaluated on
 every run) rather than planning several tracks ahead - it naturally
@@ -450,11 +457,16 @@ alongside the console summary.
   the other one. Picking the least-recently-used one instead rotates
   through more of a genre clique rather than bouncing between just two
   artists.
-- Separately, whichever artist ends up chosen, the track actually picked
-  for them prefers one outside the track repeat guard too. If an artist's
-  entire local catalog was already used within the last
-  `TRACK_HISTORY_SIZE` additions (a small library for them), a track gets
-  repeated anyway rather than skipping the run.
+- Track freshness is now part of candidate selection itself, not a
+  separate afterthought: a candidate only counts as "found" (steps 3 and
+  3's retries) if they also have at least one track outside the track
+  repeat guard - an artist whose entire local catalog (or whatever Tidal
+  returned) was already used within the last `TRACK_HISTORY_SIZE`
+  additions is treated as a miss and skipped in favor of the next
+  candidate, exactly like one that isn't in the library at all. Only the
+  least-recently-used last-resort fallback above is exempt from this -
+  by the time it kicks in, nothing else anywhere has a fresh track
+  either, so it repeats one rather than letting the queue run dry.
 - Both repeat-guard histories are reset automatically on the TRANSITION
   into queue position 0 - a freshly-started session, whether a single
   track or a whole album/playlist queued at once - since otherwise

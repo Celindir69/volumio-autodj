@@ -886,6 +886,86 @@ tidal_find_track() {
   (( ${#files[@]} > 0 ))
 }
 
+# Plain "mpc find"/"mpc search" (no raw-protocol workaround needed here -
+# see the header comment for why volumio-autodj.sh, the cross-machine
+# variant, needs one and this local variant doesn't). "find" first (exact
+# match); "search" (case-insensitive substring match) is tried by the
+# caller as a fallback if that comes back empty - post-filtered here down
+# to only files whose own artist tag normalizes to exactly the target
+# artist, since "search" alone would also match e.g. an unrelated artist
+# whose name merely contains this one as a substring. Takes the artist
+# name and its normalized form as parameters (rather than closing over
+# $chosen_artist/$norm_chosen) so it can be used both as a discardable
+# per-candidate probe (see candidate_has_fresh_track() below) and for the
+# final, committed pick in step 5.
+collect_files_by_artist() {
+  local artist="$1" norm_target="$2" mpc_cmd="$3" fpath ftitle falbum fartist _t0 _elapsed
+  _t0=$SECONDS
+  while IFS=$'\x1f' read -r fpath ftitle falbum fartist; do
+    [[ -z "$fpath" ]] && continue
+    [[ "$(normalize "$fartist")" == "$norm_target" ]] || continue
+    files+=("$fpath")
+    titles+=("$ftitle")
+    albums+=("$falbum")
+  done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" -f $'%file%\x1f%title%\x1f%album%\x1f%artist%' "$mpc_cmd" artist "$artist" 2>>"$DEBUG_LOG")
+  _elapsed=$(( SECONDS - _t0 ))
+  (( _elapsed >= 1 )) && log "mpc $mpc_cmd artist '$artist' took ${_elapsed}s"
+  return 0
+}
+
+# Gate used by every candidate loop below before committing to a match:
+# a candidate only counts as "found" if it also has at least one track
+# that's neither excluded (EXCLUDE_KEYWORDS) nor in the recent
+# track-history guard. Confirmed live that without this, a candidate
+# whose only local track had already been played recently got committed
+# anyway, just to repeat that one track (see "repeating one anyway" in
+# step 5) - surprising when other, fresher candidates were available
+# further down the same Last.fm list. Deliberately NOT applied to the
+# final least-recently-used fallback near the end of this script, which
+# stays the intentional last resort exactly as before (if NOTHING
+# anywhere has a fresh track, repeating one is still better than letting
+# the queue run dry).
+#
+# For "local", fetches the candidate's own files via collect_files_by_artist()
+# - the same query step 5 repeats once a final choice is committed, a
+# little redundant but cheap (local MPD query, no network) and far
+# simpler than threading an already-fetched result through to step 5.
+# For "tidal", reuses whatever tidal_find_track() already populated into
+# files/titles/albums, since Tidal search already returns the full track
+# list for the matched artist in one call.
+candidate_has_fresh_track() {
+  local artist="$1" source="$2" probe_norm i kept_f kept_t kept_a
+
+  if [[ "$source" == "local" ]]; then
+    probe_norm="$(normalize "$artist")"
+    files=(); titles=(); albums=()
+    collect_files_by_artist "$artist" "$probe_norm" find
+    if (( ${#files[@]} == 0 )); then
+      collect_files_by_artist "$artist" "$probe_norm" search
+    fi
+    (( ${#files[@]} == 0 )) && return 1
+  fi
+
+  if (( ${#exclude_keywords[@]} > 0 )); then
+    kept_f=(); kept_t=(); kept_a=()
+    for (( i = 0; i < ${#files[@]}; i++ )); do
+      track_excluded "${titles[$i]}" "${albums[$i]}" && continue
+      kept_f+=("${files[$i]}")
+      kept_t+=("${titles[$i]}")
+      kept_a+=("${albums[$i]}")
+    done
+    (( ${#kept_f[@]} == 0 )) && return 1
+    files=("${kept_f[@]}")
+    titles=("${kept_t[@]}")
+    albums=("${kept_a[@]}")
+  fi
+
+  for (( i = 0; i < ${#files[@]}; i++ )); do
+    history_contains "$TRACK_HISTORY_FILE" "${files[$i]}" || return 0
+  done
+  return 1
+}
+
 chosen_artist=""
 chosen_source="local"
 
@@ -908,10 +988,13 @@ for cand in "${candidates[@]}"; do
     continue
   fi
   if real_match="$(find_local_artist "$norm_cand")"; then
-    chosen_artist="$real_match"
-    chosen_source="local"
-    log "Match found in local library: '$cand' -> '$chosen_artist'"
-    break
+    if candidate_has_fresh_track "$real_match" "local"; then
+      chosen_artist="$real_match"
+      chosen_source="local"
+      log "Match found in local library: '$cand' -> '$chosen_artist'"
+      break
+    fi
+    log "'$cand' -> '$real_match' is in the local library but has no fresh (non-excluded, not-recently-played) track available - trying the next candidate"
   fi
 done
 
@@ -935,10 +1018,13 @@ if [[ -z "$chosen_artist" ]]; then
     history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
     files=(); titles=(); albums=()
     if tidal_find_track "$cand"; then
-      chosen_artist="$tidal_matched_artist_name"
-      chosen_source="tidal"
-      log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
-      break
+      if candidate_has_fresh_track "$tidal_matched_artist_name" "tidal"; then
+        chosen_artist="$tidal_matched_artist_name"
+        chosen_source="tidal"
+        log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
+        break
+      fi
+      log "'$cand' -> '$tidal_matched_artist_name' found on Tidal but has no fresh (non-excluded, not-recently-played) track available - trying the next candidate"
     fi
   done
 fi
@@ -997,10 +1083,13 @@ try_alternate_seed() {
       continue
     fi
     if real_match="$(find_local_artist "$norm_cand")"; then
-      chosen_artist="$real_match"
-      chosen_source="local"
-      log "Retry with alternate seed '$seed': match found in local library: '$cand' -> '$chosen_artist'"
-      return 0
+      if candidate_has_fresh_track "$real_match" "local"; then
+        chosen_artist="$real_match"
+        chosen_source="local"
+        log "Retry with alternate seed '$seed': match found in local library: '$cand' -> '$chosen_artist'"
+        return 0
+      fi
+      log "Retry: '$cand' -> '$real_match' is in the local library but has no fresh track available - trying the next candidate"
     fi
   done
 
@@ -1015,10 +1104,13 @@ try_alternate_seed() {
     history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
     files=(); titles=(); albums=()
     if tidal_find_track "$cand"; then
-      chosen_artist="$tidal_matched_artist_name"
-      chosen_source="tidal"
-      log "Retry with alternate seed '$seed': not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
-      return 0
+      if candidate_has_fresh_track "$tidal_matched_artist_name" "tidal"; then
+        chosen_artist="$tidal_matched_artist_name"
+        chosen_source="tidal"
+        log "Retry with alternate seed '$seed': not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
+        return 0
+      fi
+      log "Retry: '$cand' -> '$tidal_matched_artist_name' found on Tidal but has no fresh track available - trying the next candidate"
     fi
   done
 
@@ -1116,39 +1208,19 @@ fi
 # 5. Pick one random track by that artist and build its Volumio queue uri.
 # ---------------------------------------------------------------------------
 if [[ "$chosen_source" == "local" ]]; then
-  # Plain "mpc find"/"mpc search" (no raw-protocol workaround needed here -
-  # see the header comment for why volumio-autodj.sh, the cross-machine
-  # variant, needs one and this local variant doesn't). "find" first (exact
-  # match); if that comes back empty for some other reason, fall back to
-  # "search" (case-insensitive substring match) and post-filter its results
-  # down to only files whose own artist tag normalizes to exactly the
-  # target artist - "search" alone would also match e.g. an unrelated
-  # artist whose name merely contains this one as a substring.
+  # collect_files_by_artist() is defined once, above step 4 - see its own
+  # comment for why it takes the artist/normalized-artist as parameters
+  # instead of closing over $chosen_artist.
   norm_chosen="$(normalize "$chosen_artist")"
-
-  collect_files_by_artist() {
-    local mpc_cmd="$1" fpath ftitle falbum fartist _t0 _elapsed
-    _t0=$SECONDS
-    while IFS=$'\x1f' read -r fpath ftitle falbum fartist; do
-      [[ -z "$fpath" ]] && continue
-      [[ "$(normalize "$fartist")" == "$norm_chosen" ]] || continue
-      files+=("$fpath")
-      titles+=("$ftitle")
-      albums+=("$falbum")
-    done < <(mpc -h "$MPD_HOST" -p "$MPD_PORT" -f $'%file%\x1f%title%\x1f%album%\x1f%artist%' "$mpc_cmd" artist "$chosen_artist" 2>>"$DEBUG_LOG")
-    _elapsed=$(( SECONDS - _t0 ))
-    (( _elapsed >= 1 )) && log "mpc $mpc_cmd artist '$chosen_artist' took ${_elapsed}s"
-    return 0
-  }
 
   files=()
   titles=()
   albums=()
-  collect_files_by_artist find
+  collect_files_by_artist "$chosen_artist" "$norm_chosen" find
 
   if (( ${#files[@]} == 0 )); then
     log "'mpc find artist \"$chosen_artist\"' returned nothing despite appearing in 'mpc list artist' - retrying with 'mpc search' instead"
-    collect_files_by_artist search
+    collect_files_by_artist "$chosen_artist" "$norm_chosen" search
   fi
 
   if (( ${#files[@]} == 0 )); then
