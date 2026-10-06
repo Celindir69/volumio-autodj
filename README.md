@@ -66,12 +66,16 @@ Each run does at most one check and, if needed, adds exactly one track:
    using only the very last track keeps the similarity chain from
    pivoting entirely on a single, possibly atypical pick - `SEED_WINDOW_SIZE=1`
    reproduces the old "always the last track" behavior exactly.
-3. Tries each candidate in order until one is found in the local library
-   (checked via `mpc list artist`) - and skips any candidate that was used
-   too recently (**artist repeat guard**: a small history file of the last
-   `ARTIST_HISTORY_SIZE` artists, so the same artist isn't picked again
-   right away). If a candidate isn't in the local library, also checks
-   Tidal before moving on to the next one - see "Tidal fallback" below.
+3. Checks every candidate against the local library first, in Last.fm's
+   own ranked order (most similar first), via `mpc list artist` - and
+   skips any candidate that was used too recently (**artist repeat
+   guard**: a small history file of the last `ARTIST_HISTORY_SIZE`
+   artists, so the same artist isn't picked again right away). Only if
+   none of them are in the local library does it check Tidal, again in
+   ranked order - see "Tidal fallback" below. This way a candidate
+   that's actually in your library always wins, even if a less-similar
+   candidate further down Last.fm's list would otherwise have matched
+   first on Tidal.
 4. Picks one random track by the matched artist, preferring one that isn't
    in the **track repeat guard** (the last `TRACK_HISTORY_SIZE` tracks
    actually added - a separate, normally larger history than the artist
@@ -86,14 +90,15 @@ the small repeat-guard history.
 
 ### Tidal fallback
 
-Automatic, no separate on/off switch: whenever a Last.fm candidate isn't in
-your local library, the script also searches Tidal (via Volumio's own
-`/api/v1/search` - the same one behind Volumio's UI search box) before
-giving up on that candidate and moving on to the next. Local matches always
-win when both exist - Tidal is only ever tried after the local lookup for
-that *same* candidate has already failed, so this only widens what counts
-as "found," it never changes which candidate is picked when your library
-already has it.
+Automatic, no separate on/off switch: only once **none** of a seed's
+Last.fm candidates are found in your local library does the script search
+Tidal (via Volumio's own `/api/v1/search` - the same one behind Volumio's
+UI search box) for each of them in turn, in the same most-similar-first
+order. A local match always wins over a Tidal one across the *whole*
+candidate list, not just for whichever one is being checked at a given
+moment - so a candidate found on Tidal can never "steal" the pick from a
+less-similar candidate further down Last.fm's list that's actually in
+your own library.
 
 Naturally a no-op if you don't have Tidal set up as a Volumio source: the
 search response then simply carries no Tidal results at all, so there's
