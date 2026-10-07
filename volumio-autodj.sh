@@ -83,10 +83,10 @@ CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 # same artist turns up on several services. Default: every service Volumio
 # itself offers search for - a service that isn't set up as a Volumio
 # source simply never shows up in the search response, so listing it costs
-# nothing. "tidal" = TIDAL, "qobuz" = Qobuz, "hra"/"highresaudio" =
+# nothing. "tidal" = TIDAL, "qobuz" = Qobuz, "hi_res_audio" (also "hra"/"highresaudio") =
 # HIGHRESAUDIO, "spop"/"spotify" = Spotify (Volumio's Spotify plugin with
 # search; Spotify Connect alone has none). Empty = local library only.
-STREAM_SERVICES="${STREAM_SERVICES-tidal qobuz hra highresaudio spop spotify}"
+STREAM_SERVICES="${STREAM_SERVICES-tidal qobuz hi_res_audio hra highresaudio spop spotify}"
 
 # Hard wall-clock budget (seconds, via bash's own $SECONDS) for the whole
 # candidate search - steps 3/4/4b combined (every Last.fm call, every

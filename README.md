@@ -229,10 +229,10 @@ further.
   come back too soon even if its artist is fine to reuse sooner. Falls
   back to repeating a track anyway if an artist's whole local catalog was
   used within this window (small library for them).
-- `STREAM_SERVICES` (default `tidal qobuz hra highresaudio spop spotify`)
+- `STREAM_SERVICES` (default `tidal qobuz hi_res_audio hra highresaudio spop spotify`)
   - space-separated Volumio service names the streaming fallback may use,
-  earlier ones preferred: `tidal` = TIDAL, `qobuz` = Qobuz, `hra`/
-  `highresaudio` = HIGHRESAUDIO, `spop`/`spotify` = Spotify. Set it to an
+  earlier ones preferred: `tidal` = TIDAL, `qobuz` = Qobuz, `hi_res_audio`
+  (also `hra`/`highresaudio`) = HIGHRESAUDIO, `spop`/`spotify` = Spotify. Set it to an
   empty string (`STREAM_SERVICES=`) for local library only.
 - `EXCLUDE_KEYWORDS` (default empty) - semicolon-separated list of words/
   phrases, e.g. `Live;Tubular Bells;Ommadawn`. Any candidate track whose
