@@ -75,11 +75,12 @@ Each run does at most one check and, if needed, adds exactly one track:
    moving on to the next candidate exactly as if it hadn't matched at
    all, rather than committing to an artist whose only track(s) were
    just played. Only if none of them are in the local library at all
-   does it check Tidal, again in ranked order - see "Tidal fallback"
-   below. This way a candidate that's actually in your library, with a
-   fresh track available, always wins - even if a less-similar candidate
-   further down Last.fm's list would otherwise have matched first on
-   Tidal.
+   does it check the streaming services (TIDAL, Qobuz, HIGHRESAUDIO,
+   Spotify), again in ranked order - see "Streaming fallback" below. This
+   way a candidate that's actually in your library, with a fresh track
+   available, always wins - even if a less-similar candidate further down
+   Last.fm's list would otherwise have matched first on a streaming
+   service.
 4. Picks one random track by the matched artist from whichever ones
    aren't in the **track repeat guard** (the last `TRACK_HISTORY_SIZE`
    tracks actually added - a separate, normally larger history than the
@@ -95,29 +96,34 @@ every run) rather than planning several tracks ahead - it naturally
 "drifts" the similarity chain over time and needs no extra state beyond
 the small repeat-guard history.
 
-### Tidal fallback
+### Streaming fallback
 
-Automatic, no separate on/off switch: only once **none** of a seed's
-Last.fm candidates are found in your local library does the script search
-Tidal (via Volumio's own `/api/v1/search` - the same one behind Volumio's
-UI search box) for each of them in turn, in the same most-similar-first
-order. A local match always wins over a Tidal one across the *whole*
-candidate list, not just for whichever one is being checked at a given
-moment - so a candidate found on Tidal can never "steal" the pick from a
+Only once **none** of a seed's Last.fm candidates are found in your local
+library does the script search the streaming services (via Volumio's own
+`/api/v1/search` - the same one behind Volumio's UI search box) for each
+of them in turn, in the same most-similar-first order. A local match
+always wins over a streaming one across the *whole* candidate list, not
+just for whichever one is being checked at a given moment - so a
+candidate found on a streaming service can never "steal" the pick from a
 less-similar candidate further down Last.fm's list that's actually in
 your own library.
 
-Naturally a no-op if you don't have Tidal set up as a Volumio source: the
-search response then simply carries no Tidal results at all, so there's
-nothing to detect or configure - it just never matches anything there.
-Picked tracks go through the exact same repeat guards as local ones
-(`ARTIST_HISTORY_SIZE`/`TRACK_HISTORY_SIZE`), keyed by their `tidal://...`
-uri.
+Which services count is set by `STREAM_SERVICES` (see below) - by default
+TIDAL, Qobuz, HIGHRESAUDIO and Spotify, in that order of preference when
+the same artist turns up on several of them. Each one is naturally a
+no-op if it isn't set up as a Volumio source: the search response then
+simply carries no results from it, so there's nothing to detect - it just
+never matches anything there. Spotify needs Volumio's Spotify plugin with
+search (Spotify Connect alone has none). Picked tracks go through the
+exact same repeat guards as local ones
+(`ARTIST_HISTORY_SIZE`/`TRACK_HISTORY_SIZE`), keyed by their service uri
+(`tidal://...`, `qobuz://...`, `spotify:track:...`).
 
 Not extended to the final least-recently-used fallback step (the one that
 kicks in only once every candidate has already failed both local and
-Tidal lookups, plus every retry) - that step is specifically about reusing
-a previously-successful *local* pick rather than searching further.
+streaming lookups, plus every retry) - that step is specifically about
+reusing a previously-successful *local* pick rather than searching
+further.
 
 ### Setup
 
@@ -223,6 +229,11 @@ a previously-successful *local* pick rather than searching further.
   come back too soon even if its artist is fine to reuse sooner. Falls
   back to repeating a track anyway if an artist's whole local catalog was
   used within this window (small library for them).
+- `STREAM_SERVICES` (default `tidal qobuz hi_res_audio hra highresaudio spop spotify`)
+  - space-separated Volumio service names the streaming fallback may use,
+  earlier ones preferred: `tidal` = TIDAL, `qobuz` = Qobuz, `hi_res_audio`
+  (also `hra`/`highresaudio`) = HIGHRESAUDIO, `spop`/`spotify` = Spotify. Set it to an
+  empty string (`STREAM_SERVICES=`) for local library only.
 - `EXCLUDE_KEYWORDS` (default empty) - semicolon-separated list of words/
   phrases, e.g. `Live;Tubular Bells;Ommadawn`. Any candidate track whose
   title OR album contains one of these, case-insensitively, is skipped
@@ -510,7 +521,7 @@ alongside the console summary.
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
 `SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`,
-`EXCLUDE_KEYWORDS`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
+`EXCLUDE_KEYWORDS`, `STREAM_SERVICES`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
 `AUTO_CROSSFADE`, `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:

@@ -82,12 +82,23 @@ QUEUE_LOW_THRESHOLD="${QUEUE_LOW_THRESHOLD:-3}"
 # tries them in order (most similar first) until one is found locally.
 CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 
+# Streaming fallback services: space-separated Volumio "service" names
+# whose search results may be used for a candidate that isn't in the local
+# library (see stream_find_track() below). Earlier names win when the
+# same artist turns up on several services. Default: every service Volumio
+# itself offers search for - a service that isn't set up as a Volumio
+# source simply never shows up in the search response, so listing it costs
+# nothing. "tidal" = TIDAL, "qobuz" = Qobuz, "hi_res_audio" (also "hra"/"highresaudio") =
+# HIGHRESAUDIO, "spop"/"spotify" = Spotify (Volumio's Spotify plugin with
+# search; Spotify Connect alone has none). Empty = local library only.
+STREAM_SERVICES="${STREAM_SERVICES-tidal qobuz hi_res_audio hra highresaudio spop spotify}"
+
 # Hard wall-clock budget (seconds, via bash's own $SECONDS) for the whole
 # candidate search - steps 3/4/4b combined (every Last.fm call, every
-# per-candidate Tidal fallback lookup, across the initial seed AND every
+# per-candidate streaming fallback lookup, across the initial seed AND every
 # retry seed). Confirmed live on a real device: with CANDIDATE_LIMIT=20
 # and a repeat guard that had already exhausted the "easy", quickly-found
-# local matches, enough candidates needed a Tidal lookup (each its own
+# local matches, enough candidates needed a streaming lookup (each its own
 # "curl --max-time 10" call) that the WHOLE RUN exceeded the 45s timeout
 # the caller (autodj-plugin's index.js execFile call, or the standalone
 # script's own cron/systemd scheduling) kills it at - the run was
@@ -95,7 +106,7 @@ CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 # Checked at the top of every candidate-loop iteration (both the initial
 # loop below and the one inside try_alternate_seed()) and before starting
 # another retry - once exceeded, candidate search stops early and falls
-# through to the existing LOCAL-only, Last.fm/Tidal-free LRU fallback
+# through to the existing LOCAL-only, Last.fm/streaming-free LRU fallback
 # below, which is fast and always finishes well within budget.
 #
 # Checked only BETWEEN candidates, not DURING one - confirmed live that
@@ -103,7 +114,7 @@ CANDIDATE_LIMIT="${CANDIDATE_LIMIT:-20}"
 # budget by much more than one candidate's worth of time if "curl
 # --max-time 10" doesn't actually cap a single call's wall time as
 # tightly as its name implies on this device (seen in practice: a run
-# whose seed's candidates needed several Tidal lookups took 57s before
+# whose seed's candidates needed several streaming lookups took 57s before
 # this deadline fired, not ~25-35s). Every "curl --max-time 10" call in
 # this script is therefore ALSO wrapped in "timeout 12" below - a second,
 # independent, OS-level hard kill that doesn't rely on curl enforcing its
@@ -817,15 +828,16 @@ find_local_artist() {
 }
 
 # ---------------------------------------------------------------------------
-# Tidal fallback (automatic - no separate on/off switch): for a candidate
-# NOT found in the local library, also search Tidal via Volumio's own
+# Streaming fallback (TIDAL, Qobuz, HIGHRESAUDIO, Spotify - whichever are
+# listed in STREAM_SERVICES and set up in Volumio): for a candidate NOT
+# found in the local library, also search them via Volumio's own
 # /api/v1/search - confirmed on a real device to already return
 # fully-formed track items (uri, title, artist, album, service, type) for
-# anything Tidal has, so there's no need to hand-build a "tidal://..." uri
+# anything the service has, so there's no need to hand-build a "tidal://..." uri
 # the way the local mpc lookup needs a URI_PREFIXES mapping. Naturally a
-# no-op wherever Tidal isn't set up as a Volumio source: the search
-# response then simply carries no "service": "tidal" items at all, so no
-# separate "is Tidal available" check is needed either - it falls out of
+# no-op wherever a service isn't set up as a Volumio source: the search
+# response then simply carries no items with that "service" at all, so no
+# separate "is it available" check is needed either - it falls out of
 # the same result set. Filters by the "service"/"type" fields rather than
 # any list's title text (e.g. a German "TIDAL Titel") to stay independent
 # of Volumio's own UI language setting.
@@ -839,15 +851,21 @@ find_local_artist() {
 # collect_files_by_artist()). Post-filters to an exact (normalized) artist
 # match, same reasoning as the local "mpc search" fallback needing one:
 # Volumio's own search is fuzzy/substring, not exact. Also records the
-# artist name exactly as Tidal has it tagged (tidal_matched_artist_name),
-# mirroring find_local_artist() returning the locally-tagged canonical
-# name rather than the raw Last.fm candidate string.
+# artist name exactly as the service has it tagged
+# (stream_matched_artist_name), mirroring find_local_artist() returning the
+# locally-tagged canonical name rather than the raw Last.fm candidate
+# string. Only tracks of the first listed service that has this artist are
+# kept, so one pick never mixes the same song from two services. Each
+# kept track's service and trackType are remembered in stream_uris/
+# stream_svcs/stream_types (parallel arrays, no "declare -A" - see above)
+# for the addToQueue call in step 6.
 # ---------------------------------------------------------------------------
-tidal_find_track() {
-  local target_artist="$1" target_norm search_json uri title album artist_field _t0 _elapsed _rc
+stream_find_track() {
+  local target_artist="$1" target_norm search_json uri title album artist_field svc ttype want _t0 _elapsed _rc
 
   target_norm="$(normalize "$target_artist")"
-  tidal_matched_artist_name=""
+  stream_matched_artist_name=""
+  [[ -z "${STREAM_SERVICES// /}" ]] && return 1
 
   _t0=$SECONDS
   # NOT "search_json=\"\$(...)\" || return 1" - a failing command
@@ -868,20 +886,27 @@ tidal_find_track() {
   # where the OVERALL candidate search sometimes takes far longer than any
   # single call's own --max-time/timeout would suggest) - silent otherwise
   # to avoid spamming the debug log on every normal-speed call.
-  (( _elapsed >= 1 )) && log "Tidal lookup for '$target_artist' took ${_elapsed}s (rc=$_rc)"
+  (( _elapsed >= 1 )) && log "Streaming lookup for '$target_artist' took ${_elapsed}s (rc=$_rc)"
   (( _rc != 0 )) && return 1
 
-  while IFS=$'\x1f' read -r uri title album artist_field; do
-    [[ -z "$uri" ]] && continue
-    [[ "$(normalize "$artist_field")" == "$target_norm" ]] || continue
-    files+=("$uri")
-    titles+=("$title")
-    albums+=("$album")
-    [[ -z "$tidal_matched_artist_name" ]] && tidal_matched_artist_name="$artist_field"
-  done < <(printf '%s' "$search_json" | jq -r '
-      .navigation.lists[]?.items[]? | select(.service == "tidal" and .type == "song") |
-      [.uri, .title, (.album // ""), (.artist // "")] | join("\u001f")
-    ' 2>>"$DEBUG_LOG")
+  for want in $STREAM_SERVICES; do
+    while IFS=$'\x1f' read -r uri title album artist_field svc ttype; do
+      [[ -z "$uri" ]] && continue
+      [[ "$(normalize "$artist_field")" == "$target_norm" ]] || continue
+      files+=("$uri")
+      titles+=("$title")
+      albums+=("$album")
+      stream_uris+=("$uri")
+      stream_svcs+=("$svc")
+      stream_types+=("${ttype:-$svc}")
+      [[ -z "$stream_matched_artist_name" ]] && stream_matched_artist_name="$artist_field"
+    done < <(printf '%s' "$search_json" | jq -r --arg want "$want" '
+        .navigation.lists[]?.items[]? |
+        select(.type == "song" and .service == $want) |
+        [.uri, .title, (.album // ""), (.artist // ""), .service, (.trackType // "")] | join("\u001f")
+      ' 2>>"$DEBUG_LOG")
+    (( ${#files[@]} > 0 )) && break
+  done
 
   (( ${#files[@]} > 0 ))
 }
@@ -930,9 +955,9 @@ collect_files_by_artist() {
 # - the same query step 5 repeats once a final choice is committed, a
 # little redundant but cheap (local MPD query, no network) and far
 # simpler than threading an already-fetched result through to step 5.
-# For "tidal", reuses whatever tidal_find_track() already populated into
-# files/titles/albums, since Tidal search already returns the full track
-# list for the matched artist in one call.
+# For "stream", reuses whatever stream_find_track() already populated into
+# files/titles/albums, since the streaming search already returns the full
+# track list for the matched artist in one call.
 candidate_has_fresh_track() {
   local artist="$1" source="$2" probe_norm i kept_f kept_t kept_a
 
@@ -968,11 +993,14 @@ candidate_has_fresh_track() {
 
 chosen_artist=""
 chosen_source="local"
+# Service/trackType of every streaming track stream_find_track() has seen
+# this run, looked up again for the one finally picked (step 6).
+stream_uris=(); stream_svcs=(); stream_types=()
 
 # Pass 1: LOCAL ONLY, walking the whole candidate list in Last.fm's own
-# ranked order (most similar first). Deliberately does NOT try Tidal
+# ranked order (most similar first). Deliberately does NOT try streaming
 # per-candidate as it goes - confirmed live that doing so let an early,
-# Tidal-only candidate (e.g. Last.fm's #1 most-similar pick) win over a
+# streaming-only candidate (e.g. Last.fm's #1 most-similar pick) win over a
 # candidate ranked lower that WAS in the local library, since the old
 # single-pass loop took the first match of EITHER kind and stopped right
 # there. No deadline check needed here - purely local array lookups
@@ -999,8 +1027,8 @@ for cand in "${candidates[@]}"; do
 done
 
 # Pass 2: only once NONE of the candidates above matched locally - NOW
-# try Tidal, again walking the whole list in ranked order, so the
-# Tidal-widened search still prefers Last.fm's most-similar candidate
+# try streaming, again walking the whole list in ranked order, so the
+# streaming-widened search still prefers Last.fm's most-similar candidate
 # first among the ones that have no local match at all. Guarded by
 # SEARCH_DEADLINE_SECONDS since this is where the real network cost
 # lives (one curl per candidate).
@@ -1010,21 +1038,21 @@ if [[ -z "$chosen_artist" ]]; then
     [[ -z "$cand" ]] && continue
     cand_tried=$(( cand_tried + 1 ))
     if search_deadline_exceeded; then
-      log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached after trying $cand_tried/${#candidates[@]} candidate(s) on Tidal (actual elapsed: $(( SECONDS - search_start_seconds ))s) for '$seed_artist' - stopping early"
+      log "Search deadline (${SEARCH_DEADLINE_SECONDS}s) reached after trying $cand_tried/${#candidates[@]} candidate(s) via streaming (actual elapsed: $(( SECONDS - search_start_seconds ))s) for '$seed_artist' - stopping early"
       break
     fi
     norm_cand="$(normalize "$cand")"
     # Already logged as skipped in pass 1 above - no need to repeat it.
     history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
     files=(); titles=(); albums=()
-    if tidal_find_track "$cand"; then
-      if candidate_has_fresh_track "$tidal_matched_artist_name" "tidal"; then
-        chosen_artist="$tidal_matched_artist_name"
-        chosen_source="tidal"
-        log "Not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
+    if stream_find_track "$cand"; then
+      if candidate_has_fresh_track "$stream_matched_artist_name" "stream"; then
+        chosen_artist="$stream_matched_artist_name"
+        chosen_source="stream"
+        log "Not in local library - match found via streaming (${stream_svcs[${#stream_svcs[@]}-1]}) instead: '$cand' -> '$chosen_artist'"
         break
       fi
-      log "'$cand' -> '$tidal_matched_artist_name' found on Tidal but has no fresh (non-excluded, not-recently-played) track available - trying the next candidate"
+      log "'$cand' -> '$stream_matched_artist_name' found via streaming but has no fresh (non-excluded, not-recently-played) track available - trying the next candidate"
     fi
   done
 fi
@@ -1093,7 +1121,7 @@ try_alternate_seed() {
     fi
   done
 
-  # Pass 2: only once nothing above matched locally - NOW try Tidal.
+  # Pass 2: only once nothing above matched locally - NOW try streaming.
   for cand in "${candidates[@]}"; do
     [[ -z "$cand" ]] && continue
     if search_deadline_exceeded; then
@@ -1103,14 +1131,14 @@ try_alternate_seed() {
     norm_cand="$(normalize "$cand")"
     history_contains "$ARTIST_HISTORY_FILE" "$norm_cand" && continue
     files=(); titles=(); albums=()
-    if tidal_find_track "$cand"; then
-      if candidate_has_fresh_track "$tidal_matched_artist_name" "tidal"; then
-        chosen_artist="$tidal_matched_artist_name"
-        chosen_source="tidal"
-        log "Retry with alternate seed '$seed': not in local library - match found on Tidal instead: '$cand' -> '$chosen_artist'"
+    if stream_find_track "$cand"; then
+      if candidate_has_fresh_track "$stream_matched_artist_name" "stream"; then
+        chosen_artist="$stream_matched_artist_name"
+        chosen_source="stream"
+        log "Retry with alternate seed '$seed': not in local library - match found via streaming (${stream_svcs[${#stream_svcs[@]}-1]}) instead: '$cand' -> '$chosen_artist'"
         return 0
       fi
-      log "Retry: '$cand' -> '$tidal_matched_artist_name' found on Tidal but has no fresh track available - trying the next candidate"
+      log "Retry: '$cand' -> '$stream_matched_artist_name' found via streaming but has no fresh track available - trying the next candidate"
     fi
   done
 
@@ -1167,11 +1195,11 @@ fi
 # - see below) is still preferable to playback simply stopping.
 #
 # Deliberately LOCAL-only, unlike the two loops above - by this point every
-# candidate has already had its chance at both a local AND a Tidal match
+# candidate has already had its chance at both a local AND a streaming match
 # (and lost to the repeat guard either way), so this is specifically about
 # reusing a previously-successful LOCAL pick rather than widening the
 # search further; keeps this already-dense fallback path from growing a
-# second, Tidal-flavored copy of itself for comparatively little benefit.
+# second, streaming-flavored copy of itself for comparatively little benefit.
 if [[ -z "$chosen_artist" ]]; then
   fallback_artist=""
   fallback_cand_name=""
@@ -1228,8 +1256,8 @@ if [[ "$chosen_source" == "local" ]]; then
     exit 0
   fi
 fi
-# else: chosen_source == "tidal" - files/titles/albums were already
-# populated by tidal_find_track() back in step 4/4b, nothing to do here.
+# else: chosen_source == "stream" - files/titles/albums were already
+# populated by stream_find_track() back in step 4/4b, nothing to do here.
 
 # Drop anything matching EXCLUDE_KEYWORDS before the track-history step
 # below - an excluded track must never be picked, no matter how long ago
@@ -1293,16 +1321,29 @@ if [[ -z "$picked_title" ]]; then
   picked_title="${picked_file##*/}"
 fi
 
-if [[ "$chosen_source" == "tidal" ]]; then
-  # tidal_find_track() already stored the complete, ready-to-use
-  # "tidal://..." uri as the "file" identity - no prefix mapping needed
-  # (unlike the local library, Tidal's own uri scheme is self-contained).
-  # Volumio's own Tidal search results all carry "trackType": "tidal" -
-  # hardcoded here to match rather than derived from a file extension that
-  # doesn't exist for a streamed track.
+if [[ "$chosen_source" == "stream" ]]; then
+  # stream_find_track() already stored the complete, ready-to-use service
+  # uri (e.g. "tidal://...", "qobuz://...", "spotify:track:...") as the
+  # "file" identity - no prefix mapping needed (unlike the local library,
+  # a streaming uri scheme is self-contained). Service and trackType come
+  # from the same search item (Volumio's TIDAL results all carry
+  # "trackType": "tidal"; where a service sends none, its service name
+  # stands in) rather than from a file extension that doesn't exist for a
+  # streamed track.
   uri="$picked_file"
-  picked_track_type="tidal"
-  add_service="tidal"
+  picked_track_type=""
+  add_service=""
+  for (( i = 0; i < ${#stream_uris[@]}; i++ )); do
+    if [[ "${stream_uris[$i]}" == "$picked_file" ]]; then
+      add_service="${stream_svcs[$i]}"
+      picked_track_type="${stream_types[$i]}"
+      break
+    fi
+  done
+  if [[ -z "$add_service" ]]; then
+    log "No streaming service recorded for uri '$picked_file' - skipping"
+    exit 0
+  fi
 else
   # Volumio's addToQueue wants a "trackType" (the file format, e.g. "flac"),
   # derived here from the file extension rather than queried separately.
