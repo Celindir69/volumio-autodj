@@ -242,6 +242,10 @@ further.
   word can have false positives (`Live` also matches an album called
   `Olive Grove`); if every track by the chosen artist gets excluded this
   way, that run is skipped rather than retrying with a different artist.
+- `MAX_TRACK_MINUTES` (default `20`) - tracks longer than this (DJ mixes,
+  whole-concert recordings) are never picked, locally or from streaming
+  results that report a duration; tracks of unknown length are kept. `0`
+  disables the limit.
 - `MAX_SEED_RETRIES` (default `2`) - if every similar artist for the
   initial seed is blocked by the repeat guard, how many additional random
   seed artists from the queue to retry with before falling back to the
@@ -521,7 +525,7 @@ alongside the console summary.
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
 `SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`,
-`EXCLUDE_KEYWORDS`, `STREAM_SERVICES`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
+`EXCLUDE_KEYWORDS`, `MAX_TRACK_MINUTES`, `STREAM_SERVICES`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
 `AUTO_CROSSFADE`, `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:

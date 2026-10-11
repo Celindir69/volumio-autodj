@@ -132,6 +132,12 @@ TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
 # (default) disables the filter entirely.
 EXCLUDE_KEYWORDS="${EXCLUDE_KEYWORDS:-}"
 
+# Tracks longer than this many minutes (DJ mixes, live recordings of whole
+# concerts) are never picked - they would block the queue for half an hour
+# or more. Applies to local tracks and to streaming results that report a
+# duration; tracks with unknown length are kept. 0 disables the limit.
+MAX_TRACK_MINUTES="${MAX_TRACK_MINUTES:-20}"
+
 exclude_keywords=()
 # Guarded by "[[ -n ... ]]" rather than unconditionally running
 # "read -ra"/expanding its result - on this device's bash, "read -ra arr
@@ -244,6 +250,26 @@ done
 # granularity for a budget measured in tens of seconds.
 search_deadline_exceeded() {
   (( SECONDS - search_start_seconds >= SEARCH_DEADLINE_SECONDS ))
+}
+
+# "m:ss", "h:mm:ss" or plain seconds -> seconds (empty/unknown -> 0)
+to_seconds() {
+  local v="$1" s=0 part
+  local -a _parts
+  [[ -z "$v" ]] && { echo 0; return; }
+  IFS=':' read -ra _parts <<< "$v"
+  for part in "${_parts[@]}"; do
+    part="${part%%.*}"
+    [[ "$part" =~ ^[0-9]+$ ]] || { echo 0; return; }
+    s=$(( s * 60 + 10#$part ))
+  done
+  echo "$s"
+}
+
+# True if a track of this length (seconds; 0 = unknown) is over MAX_TRACK_MINUTES.
+too_long() {
+  local sec="${1:-0}"
+  (( MAX_TRACK_MINUTES > 0 && sec > MAX_TRACK_MINUTES * 60 ))
 }
 
 normalize() {
@@ -867,9 +893,10 @@ stream_find_track() {
   (( _rc != 0 )) && return 1
 
   for want in $STREAM_SERVICES; do
-    while IFS=$'\x1f' read -r uri title album artist_field svc ttype; do
+    while IFS=$'\x1f' read -r uri title album artist_field svc ttype dur; do
       [[ -z "$uri" ]] && continue
       [[ "$(normalize "$artist_field")" == "$target_norm" ]] || continue
+      too_long "$(to_seconds "$dur")" && continue
       files+=("$uri")
       titles+=("$title")
       albums+=("$album")
@@ -880,7 +907,7 @@ stream_find_track() {
     done < <(printf '%s' "$search_json" | jq -r --arg want "$want" '
         .navigation.lists[]?.items[]? |
         select(.type == "song" and .service == $want) |
-        [.uri, .title, (.album // ""), (.artist // ""), .service, (.trackType // "")] | join("\u001f")
+        [.uri, .title, (.album // ""), (.artist // ""), .service, (.trackType // ""), ((.duration // 0) | tostring)] | join("\u001f")
       ' 2>>"$DEBUG_LOG")
     (( ${#files[@]} > 0 )) && break
   done
@@ -902,10 +929,10 @@ stream_find_track() {
 # per-candidate probe (see candidate_has_fresh_track() below) and for the
 # final, committed pick in step 5.
 collect_files_by_artist() {
-  local artist="$1" norm_target="$2" verb="$3" cur_file="" cur_artist="" cur_title="" cur_album="" line
+  local artist="$1" norm_target="$2" verb="$3" cur_file="" cur_artist="" cur_title="" cur_album="" cur_time=0 line
 
   flush_current() {
-    if [[ -n "$cur_file" && "$(normalize "$cur_artist")" == "$norm_target" ]]; then
+    if [[ -n "$cur_file" && "$(normalize "$cur_artist")" == "$norm_target" ]] && ! too_long "$cur_time"; then
       files+=("$cur_file")
       titles+=("$cur_title")
       albums+=("$cur_album")
@@ -920,7 +947,9 @@ collect_files_by_artist() {
         cur_artist=""
         cur_title=""
         cur_album=""
+        cur_time=0
         ;;
+      "Time: "*)   cur_time="$(to_seconds "${line#Time: }")" ;;
       "Artist: "*) cur_artist="${line#Artist: }" ;;
       "Title: "*)  cur_title="${line#Title: }" ;;
       "Album: "*)  cur_album="${line#Album: }" ;;
