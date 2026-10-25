@@ -359,10 +359,17 @@ jq_safe() {
 # since that would fold together distinct files that merely share
 # whitespace/punctuation in their path).
 # ---------------------------------------------------------------------------
+# Whole non-negative number, else the given default: values from Volumio's
+# API and the state files are used in bash arithmetic, which would evaluate
+# anything else as an expression.
+uint_or() {
+  if [[ "$1" =~ ^[0-9]+$ ]]; then printf '%s' "$1"; else printf '%s' "$2"; fi
+}
+
 history_contains() {
   local file="$1" entry="$2"
   [[ -f "$file" ]] || return 1
-  grep -qxF "$entry" "$file"
+  grep -qxF -- "$entry" "$file"
 }
 
 history_add() {
@@ -381,7 +388,7 @@ history_add() {
   # entry, and trims to $size, all before ever touching the real file -
   # then writes the result with "cat > file" (truncate + write to the
   # existing inode, no rename() involved at all).
-  { grep -vxF "$entry" "$file" 2>/dev/null || true; printf '%s\n' "$entry"; } \
+  { grep -vxF -- "$entry" "$file" 2>/dev/null || true; printf '%s\n' "$entry"; } \
     | tail -n "$size" > "${file}.tmp" 2>>"$DEBUG_LOG"
   cat "${file}.tmp" > "$file" 2>>"$DEBUG_LOG" || log "Warning: could not write history file '$file' - repeat guard may not persist this run"
   rm -f "${file}.tmp"
@@ -557,7 +564,7 @@ boundary_watch_tick() {
     return 0
   fi
 
-  current_position="$(jq_safe '.position // empty' '' "$watch_state_json")"
+  current_position="$(uint_or "$(jq_safe '.position // empty' '' "$watch_state_json")" '')"
   [[ -n "$current_position" ]] || return 0
 
   # Own, faster-than-the-main-tick fresh-queue detection - same
@@ -582,11 +589,16 @@ boundary_watch_tick() {
     replaygain_reset_tracking
     crossfade_reset_tracking
   fi
-  printf '%s' "$current_position" > "$WATCH_LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || true
+  # Only when it changed: this runs every few seconds, and an SD card
+  # should not be written that often for nothing.
+  if [[ "$current_position" != "$watch_last_position" ]]; then
+    printf '%s' "$current_position" > "$WATCH_LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || true
+  fi
 
   [[ -f "$MIXED_BOUNDARY_FILE" ]] || return 0
   local mixed_boundary
   mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
+  mixed_boundary="$(uint_or "$mixed_boundary" '')"
   [[ -n "$mixed_boundary" ]] || return 0
 
   if (( current_position >= mixed_boundary )); then
@@ -653,8 +665,8 @@ queue_json="$(timeout 12 curl -sf --max-time 10 "${api_base}/getqueue")" || {
   exit 1
 }
 
-position="$(jq_safe '.position // 0' '0' "$state_json")"
-queue_len="$(jq_safe '.queue | length' '0' "$queue_json")"
+position="$(uint_or "$(jq_safe '.position // 0' '0' "$state_json")" 0)"
+queue_len="$(uint_or "$(jq_safe '.queue | length' '0' "$queue_json")" 0)"
 remaining=$(( queue_len - position - 1 ))
 
 log "Queue: $queue_len tracks, position=$position, remaining after current=$remaining (threshold=$QUEUE_LOW_THRESHOLD)"
@@ -691,7 +703,9 @@ if (( position == 0 )) && [[ "$last_position" != "0" ]] && { [[ -s "$ARTIST_HIST
   rm -f "$MIXED_BOUNDARY_FILE" 2>/dev/null || true
 fi
 
-printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
+if [[ "$position" != "$last_position" ]]; then   # only when it changed (SD card)
+  printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning: could not persist last-seen queue position"
+fi
 
 # Only actually flip replay gain/crossfade on once PLAYBACK ITSELF reaches
 # the first AutoDJ-added track (MIXED_BOUNDARY_FILE, set below once a track
@@ -702,6 +716,7 @@ printf '%s' "$position" > "$LAST_POSITION_FILE" 2>>"$DEBUG_LOG" || log "Warning:
 # incorrectly apply these settings to that original, still-playing content.
 if [[ -f "$MIXED_BOUNDARY_FILE" ]]; then
   mixed_boundary="$(cat "$MIXED_BOUNDARY_FILE" 2>/dev/null)" || true
+  mixed_boundary="$(uint_or "$mixed_boundary" '')"
   if [[ -n "$mixed_boundary" ]] && (( position >= mixed_boundary )); then
     replaygain_sync "track"
     crossfade_sync "$AUTO_CROSSFADE"
@@ -769,7 +784,7 @@ history_add "$ARTIST_HISTORY_FILE" "$ARTIST_HISTORY_SIZE" "$norm_seed"
 # ---------------------------------------------------------------------------
 # 3. Ask Last.fm for similar artists (most similar first).
 # ---------------------------------------------------------------------------
-lastfm_url="http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed_artist")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
+lastfm_url="https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed_artist")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
 _t0=$SECONDS
 lastfm_json="$(timeout 12 curl -sf --max-time 10 "$lastfm_url")" || {
   log "Last.fm request failed"
@@ -1103,7 +1118,7 @@ fi
 try_alternate_seed() {
   local seed="$1" url json err line cand norm_cand real_match _t0 _elapsed
 
-  url="http://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
+  url="https://ws.audioscrobbler.com/2.0/?method=artist.getsimilar&artist=$(urlencode "$seed")&api_key=${LASTFM_API_KEY}&format=json&limit=${CANDIDATE_LIMIT}"
   _t0=$SECONDS
   json="$(timeout 12 curl -sf --max-time 10 "$url")" || {
     log "Retry: Last.fm request failed for alternate seed '$seed'"
@@ -1239,7 +1254,7 @@ if [[ -z "$chosen_artist" ]]; then
       # "|| true": under "set -e", grep finding no match (exit 1) would
       # otherwise abort the whole script right here instead of just
       # leaving line_no empty for the "not in history at all" case below.
-      line_no="$(grep -nxF "$norm_cand" "$ARTIST_HISTORY_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)"
+      line_no="$(grep -nxF -- "$norm_cand" "$ARTIST_HISTORY_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)"
       [[ -z "$line_no" ]] && line_no=0
       if (( line_no < fallback_line )); then
         fallback_line=$line_no
