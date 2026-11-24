@@ -137,6 +137,15 @@ TRACK_HISTORY_SIZE="${TRACK_HISTORY_SIZE:-15}"
 # (default) disables the filter entirely.
 EXCLUDE_KEYWORDS="${EXCLUDE_KEYWORDS:-}"
 
+# Tracks that must never be picked: "don't like" and NoMix in the comment
+# tag, as kept by Xplorio's tag service (Celindir69/volumio-web-app). MPD
+# leaves the comment tag out, so the script cannot see the marker itself -
+# the tag service knows it from its own edits and from the audio analysis
+# and lists the files at this address. Asked once per run, only when a
+# track is about to be chosen; no tag service (not installed, not running,
+# older version) simply means no such filter. Empty disables it.
+XPLORIO_EXCLUDED_URL="${XPLORIO_EXCLUDED_URL-http://127.0.0.1:8766/autodj/excluded}"
+
 # Tracks longer than this many minutes (DJ mixes, live recordings of whole
 # concerts) are never picked - they would block the queue for half an hour
 # or more. Applies to local tracks and to streaming results that report a
@@ -317,6 +326,42 @@ track_excluded() {
     fi
   done
   return 1
+}
+
+# The tag service's list (see XPLORIO_EXCLUDED_URL above), loaded on first
+# use. One newline-framed string ("\nUSB/a.flac\nUSB/b.flac\n") searched
+# with a quoted pattern instead of "declare -A", which needs bash 4.0+ (see
+# the note on bash versions above the candidate list further down).
+nomix_list=""
+nomix_count=0
+nomix_loaded=0
+nomix_load() {
+  local json f
+  (( nomix_loaded )) && return 0
+  nomix_loaded=1
+  [[ -n "$XPLORIO_EXCLUDED_URL" ]] || return 0
+  json="$(curl -sf --max-time 5 "$XPLORIO_EXCLUDED_URL" 2>/dev/null)" || json=""
+  [[ -n "$json" ]] || return 0
+  nomix_list=$'\n'
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    nomix_list+="$f"$'\n'
+    nomix_count=$(( nomix_count + 1 ))
+  done < <(printf '%s' "$json" | jq -r '.files[]?' 2>>"$DEBUG_LOG")
+  (( nomix_count > 0 )) && log "Tag service: $nomix_count track(s) are never picked (NoMix / don't like)"
+  return 0
+}
+
+# Success (0) if the file is on the tag service's list. Leading "/",
+# "mnt/" or "music-library/" are dropped first, as the tag service stores
+# plain "USB/..." paths; streaming tracks it lists as "uri:<uri>".
+track_nomix() {
+  local f="$1"
+  nomix_load
+  (( nomix_count > 0 )) || return 1
+  [[ "$nomix_list" == *$'\n'"uri:$f"$'\n'* ]] && return 0
+  f="${f#/}"; f="${f#music-library/}"; f="${f#mnt/}"
+  [[ "$nomix_list" == *$'\n'"$f"$'\n'* ]]
 }
 
 urlencode() {
@@ -1014,10 +1059,12 @@ candidate_has_fresh_track() {
     (( ${#files[@]} == 0 )) && return 1
   fi
 
-  if (( ${#exclude_keywords[@]} > 0 )); then
+  nomix_load
+  if (( ${#exclude_keywords[@]} > 0 || nomix_count > 0 )); then
     kept_f=(); kept_t=(); kept_a=()
     for (( i = 0; i < ${#files[@]}; i++ )); do
       track_excluded "${titles[$i]}" "${albums[$i]}" && continue
+      track_nomix "${files[$i]}" && continue
       kept_f+=("${files[$i]}")
       kept_t+=("${titles[$i]}")
       kept_a+=("${albums[$i]}")
@@ -1309,12 +1356,14 @@ fi
 # that ends up empty raises "unbound variable" under "set -u" on bash
 # older than 4.4 (same reasoning as eligible_indices below) - the length
 # check before the final assignment avoids ever expanding one.
-if (( ${#exclude_keywords[@]} > 0 )); then
+nomix_load
+if (( ${#exclude_keywords[@]} > 0 || nomix_count > 0 )); then
   kept_files=()
   kept_titles=()
   kept_albums=()
   for (( i = 0; i < ${#files[@]}; i++ )); do
     track_excluded "${titles[$i]}" "${albums[$i]}" && continue
+    track_nomix "${files[$i]}" && continue
     kept_files+=("${files[$i]}")
     kept_titles+=("${titles[$i]}")
     kept_albums+=("${albums[$i]}")
@@ -1328,7 +1377,7 @@ if (( ${#exclude_keywords[@]} > 0 )); then
     albums=("${kept_albums[@]}")
   fi
   if (( ${#files[@]} == 0 )); then
-    log "Every candidate track by '$chosen_artist' matched EXCLUDE_KEYWORDS - skipping this run"
+    log "Every candidate track by '$chosen_artist' matched EXCLUDE_KEYWORDS or is NoMix / don't like - skipping this run"
     exit 0
   fi
 fi
