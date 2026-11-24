@@ -242,6 +242,13 @@ further.
   word can have false positives (`Live` also matches an album called
   `Olive Grove`); if every track by the chosen artist gets excluded this
   way, that run is skipped rather than retrying with a different artist.
+- `XPLORIO_EXCLUDED_URL` (default: the tag service of
+  [Xplorio](https://github.com/Celindir69/volumio-web-app) on the Volumio
+  device, port 8766, `/autodj/excluded`) - tracks with `NoMix` anywhere in
+  their comment tag and tracks rated "don't like" there are never picked.
+  MPD does not pass the comment tag on, so the script asks the tag service
+  for the list once per run; without a tag service nothing changes. Empty
+  (`XPLORIO_EXCLUDED_URL=`) turns it off.
 - `MAX_TRACK_MINUTES` (default `20`) - tracks longer than this (DJ mixes,
   whole-concert recordings) are never picked, locally or from streaming
   results that report a duration; tracks of unknown length are kept. `0`
@@ -525,7 +532,7 @@ alongside the console summary.
 Same behavior and configuration variables as `volumio-autodj.sh`
 (`LASTFM_API_KEY`, `QUEUE_LOW_THRESHOLD`, `CANDIDATE_LIMIT`,
 `SEED_WINDOW_SIZE`, `ARTIST_HISTORY_SIZE`, `TRACK_HISTORY_SIZE`,
-`EXCLUDE_KEYWORDS`, `MAX_TRACK_MINUTES`, `STREAM_SERVICES`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
+`EXCLUDE_KEYWORDS`, `XPLORIO_EXCLUDED_URL`, `MAX_TRACK_MINUTES`, `STREAM_SERVICES`, `MAX_SEED_RETRIES`, `AUTO_REPLAYGAIN`,
 `AUTO_CROSSFADE`, `AUTODJ_URI_PREFIXES`), but runs
 directly **on** Volumio itself via cron or a systemd timer, with these
 differences:
